@@ -14,6 +14,25 @@ ARG EXTENSIONS_REF=main
 RUN git clone --depth 1 --branch "${EXTENSIONS_REF}" "${EXTENSIONS_REPOSITORY}" /extensions
 
 
+FROM alpine/git:2.49.1 AS hummingbot-api-source
+
+ARG HUMMINGBOT_API_REPOSITORY=https://github.com/hummingbot/hummingbot-api.git
+ARG HUMMINGBOT_API_REF=main
+
+RUN git clone --depth 1 --branch "${HUMMINGBOT_API_REF}" \
+    "${HUMMINGBOT_API_REPOSITORY}" /hummingbot-api
+
+
+FROM python:3.12-alpine AS hummingbot-init
+
+RUN pip install --no-cache-dir pyyaml==6.0.3
+
+COPY --from=hummingbot-api-source /hummingbot-api/bots /opt/hummingbot-bots
+COPY init_hummingbot.py /opt/condor-deploy/init_hummingbot.py
+
+ENTRYPOINT ["python", "/opt/condor-deploy/init_hummingbot.py"]
+
+
 FROM source AS assembled
 
 COPY --from=extensions \
@@ -49,7 +68,7 @@ COPY --from=assembled /src/pyproject.toml /src/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS condor
 
 ENV DEBIAN_FRONTEND=noninteractive \
     UV_COMPILE_BYTECODE=1 \

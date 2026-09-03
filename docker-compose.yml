@@ -73,30 +73,10 @@ services:
           - node1.emqx.local
 
   hummingbot-init:
-    image: hummingbot/hummingbot-api:latest
+    build:
+      context: https://github.com/CORCTON/condor-dokploy.git#main
+      target: hummingbot-init
     restart: "no"
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        if [ ! -f /seed-target/.condor-seeded ]; then
-          cp -a /hummingbot-api/bots/. /seed-target/
-          mkdir -p /seed-target/credentials/master_account/connectors
-          python - <<'PY'
-        from pathlib import Path
-        import yaml
-
-        path = Path("/seed-target/credentials/master_account/conf_client.yml")
-        config = yaml.safe_load(path.read_text(encoding="utf-8"))
-        paper = config.setdefault("paper_trade", {})
-        exchanges = list(paper.get("paper_trade_exchanges") or [])
-        if "gate_io" not in exchanges:
-            exchanges.append("gate_io")
-        paper["paper_trade_exchanges"] = exchanges
-        paper["paper_trade_account_balance"] = {"USDT": 100.0}
-        path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
-        PY
-          touch /seed-target/.condor-seeded
-        fi
     volumes:
       - /var/lib/condor-spot/bots:/seed-target
 
@@ -147,6 +127,7 @@ services:
     restart: unless-stopped
     build:
       context: https://github.com/CORCTON/condor-dokploy.git#main
+      target: condor
     depends_on:
       hummingbot-api:
         condition: service_healthy
