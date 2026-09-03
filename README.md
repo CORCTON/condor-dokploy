@@ -1,0 +1,13 @@
+# Condor on Dokploy
+
+Deployment-only wrapper for official Condor plus the shared routines maintained
+in `https://github.com/CORCTON/condor`.
+
+Every build clones the latest official `hummingbot/condor` main branch, then
+copies only four shared market-research routines from the fork. This repository
+owns the Docker build, persistent-state sync, and Dokploy Compose topology so
+deployment concerns do not modify Condor source.
+
+`hummingbot-init` enables the official `gate_io_paper_trade` connector and
+starts its paper account with 100 USDT. No Gate.io credentials are required and
+no custom execution ledger is installed.

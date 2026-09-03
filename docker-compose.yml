@@ -1,0 +1,213 @@
+services:
+  broker-init:
+    image: alpine:3.22
+    restart: "no"
+    environment:
+      BROKER_USERNAME: ${BROKER_USERNAME:-admin}
+      BROKER_PASSWORD: ${BROKER_PASSWORD:?required}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        case "$${BROKER_USERNAME}$${BROKER_PASSWORD}" in
+          *,*) echo "Broker credentials cannot contain commas" >&2; exit 1 ;;
+        esac
+        mkdir -p /bootstrap
+        printf 'user_id,password,is_superuser\n%s,%s,false\n' \
+          "$${BROKER_USERNAME}" "$${BROKER_PASSWORD}" \
+          > /bootstrap/auth-bootstrap.csv
+        chmod 0644 /bootstrap/auth-bootstrap.csv
+    volumes:
+      - condor-emqx-bootstrap:/bootstrap
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hummingbot_api
+      POSTGRES_USER: hbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_INITDB_ARGS: --encoding=UTF8
+    volumes:
+      - condor-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hbot -d hummingbot_api"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - condor-internal
+
+  emqx:
+    image: emqx:5
+    restart: unless-stopped
+    depends_on:
+      broker-init:
+        condition: service_completed_successfully
+    environment:
+      EMQX_NAME: emqx
+      EMQX_HOST: node1.emqx.local
+      EMQX_CLUSTER__DISCOVERY_STRATEGY: static
+      EMQX_CLUSTER__STATIC__SEEDS: "[emqx@node1.emqx.local]"
+      EMQX_LOADED_PLUGINS: '"emqx_recon,emqx_retainer,emqx_management,emqx_dashboard"'
+      EMQX_AUTHENTICATION__1__MECHANISM: password_based
+      EMQX_AUTHENTICATION__1__BACKEND: built_in_database
+      EMQX_AUTHENTICATION__1__USER_ID_TYPE: username
+      EMQX_AUTHENTICATION__1__BOOTSTRAP_FILE: /opt/emqx/auth/auth-bootstrap.csv
+      EMQX_AUTHENTICATION__1__BOOTSTRAP_TYPE: plain
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${BROKER_DASHBOARD_PASSWORD:?required}
+    volumes:
+      - condor-emqx-data:/opt/emqx/data
+      - condor-emqx-log:/opt/emqx/log
+      - condor-emqx-etc:/opt/emqx/etc
+      - condor-emqx-bootstrap:/opt/emqx/auth:ro
+    ports:
+      - "127.0.0.1:1883:1883"
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx_ctl", "status"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    networks:
+      condor-internal:
+        aliases:
+          - node1.emqx.local
+
+  hummingbot-init:
+    image: hummingbot/hummingbot-api:latest
+    restart: "no"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ ! -f /seed-target/.condor-seeded ]; then
+          cp -a /hummingbot-api/bots/. /seed-target/
+          mkdir -p /seed-target/credentials/master_account/connectors
+          python - <<'PY'
+        from pathlib import Path
+        import yaml
+
+        path = Path("/seed-target/credentials/master_account/conf_client.yml")
+        config = yaml.safe_load(path.read_text(encoding="utf-8"))
+        paper = config.setdefault("paper_trade", {})
+        exchanges = list(paper.get("paper_trade_exchanges") or [])
+        if "gate_io" not in exchanges:
+            exchanges.append("gate_io")
+        paper["paper_trade_exchanges"] = exchanges
+        paper["paper_trade_account_balance"] = {"USDT": 100.0}
+        path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+        PY
+          touch /seed-target/.condor-seeded
+        fi
+    volumes:
+      - /var/lib/condor-spot/bots:/seed-target
+
+  hummingbot-api:
+    image: hummingbot/hummingbot-api:latest
+    restart: unless-stopped
+    depends_on:
+      hummingbot-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+    environment:
+      USERNAME: ${HUMMINGBOT_API_USERNAME:?required}
+      PASSWORD: ${HUMMINGBOT_API_PASSWORD:?required}
+      CONFIG_PASSWORD: ${HUMMINGBOT_CONFIG_PASSWORD:?required}
+      DATABASE_URL: postgresql+asyncpg://hbot:${POSTGRES_PASSWORD:?required}@postgres:5432/hummingbot_api
+      BROKER_HOST: emqx
+      BROKER_PORT: "1883"
+      BROKER_USERNAME: ${BROKER_USERNAME:-admin}
+      BROKER_PASSWORD: ${BROKER_PASSWORD:?required}
+      BOTS_PATH: /var/lib/condor-spot/bots
+      HOST_PROC: /host/proc
+      HOST_DISK_PATH: /host/disk-probe
+      LOGFIRE_SEND_TO_LOGFIRE: "false"
+    expose:
+      - "8000"
+    volumes:
+      - /var/lib/condor-spot/bots:/hummingbot-api/bots
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /proc:/host/proc:ro
+      - /etc/hostname:/host/disk-probe:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import base64,os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/system/resources'); r.add_header('Authorization','Basic '+base64.b64encode((os.environ['USERNAME']+':'+os.environ['PASSWORD']).encode()).decode()); urllib.request.urlopen(r,timeout=5)
+      interval: 20s
+      timeout: 10s
+      start_period: 90s
+      retries: 10
+    networks:
+      - condor-internal
+
+  condor:
+    restart: unless-stopped
+    build:
+      context: https://github.com/CORCTON/condor-dokploy.git#main
+    depends_on:
+      hummingbot-api:
+        condition: service_healthy
+    environment:
+      CONDOR_MODE: ${CONDOR_MODE:-telegram}
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+      ADMIN_USER_ID: ${TELEGRAM_ADMIN_USER_ID:?required}
+      WEB_HOST: 0.0.0.0
+      WEB_URL: https://desktop.corcton.com
+      CONDOR_DEFAULT_AGENT: custom:glm-5.2
+      CUSTOM_LLM_BASE_URL: http://windsurf2api:3003/v1
+      CUSTOM_LLM_API_KEY: ${WINDSURF_API_KEY:?required}
+      CONSULT_FALLBACK_MODEL: ""
+      PYDANTIC_AI_TOOL_FILTER: full
+      UPDATE_CHECK_INTERVAL: "0"
+      CONDOR_DATA_DIR: /state/data
+      CONDOR_RUNTIME_ROOT: /state/runtime
+      CONDOR_AGENTS_ROOT: /state/agents
+      CONDOR_SHARING: "off"
+      CONDOR_TELEMETRY: "off"
+      HUMMINGBOT_API_HOST: hummingbot-api
+      HUMMINGBOT_API_PORT: "8000"
+      HUMMINGBOT_API_USERNAME: ${HUMMINGBOT_API_USERNAME:?required}
+      HUMMINGBOT_API_PASSWORD: ${HUMMINGBOT_API_PASSWORD:?required}
+      FRED_API_KEY: ${FRED_API_KEY:?required}
+      MARKETAUX_API_KEY: ${MARKETAUX_API_KEY:?required}
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:?required}
+    volumes:
+      - condor-state:/state
+    expose:
+      - "443"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:443/', timeout=5)
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 10
+    networks:
+      - condor-internal
+      - dokploy-network
+
+volumes:
+  condor-postgres-data:
+    name: condor-postgres-data
+  condor-emqx-data:
+    name: condor-emqx-data
+  condor-emqx-log:
+    name: condor-emqx-log
+  condor-emqx-etc:
+    name: condor-emqx-etc
+  condor-emqx-bootstrap:
+    name: condor-emqx-bootstrap
+  condor-state:
+    name: condor-state
+
+networks:
+  condor-internal:
+    name: condor-internal
+  dokploy-network:
+    external: true
