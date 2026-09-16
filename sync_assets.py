@@ -1,45 +1,14 @@
-"""Synchronize versioned Condor assets into the persistent runtime volume."""
+"""Prepare persistent Condor state and remove the legacy asset mirror."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
 import yaml
-
-MUTABLE_PARTS = frozenset({"store", "sessions", "dry_runs"})
-MUTABLE_FILES = frozenset({"config.yml", "learnings.md", "audit.log"})
-
-
-def _managed_files(root: Path) -> dict[str, Path]:
-    files: dict[str, Path] = {}
-    for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
-        relative = path.relative_to(root)
-        if any(part in MUTABLE_PARTS for part in relative.parts):
-            continue
-        if relative.name in MUTABLE_FILES:
-            continue
-        files[relative.as_posix()] = path
-    return files
-
-
-def _atomic_copy(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as handle:
-        temporary = Path(handle.name)
-    try:
-        shutil.copyfile(source, temporary)
-        shutil.copymode(source, temporary)
-        os.replace(temporary, destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-
 
 def _load_manifest(path: Path) -> set[str]:
     try:
@@ -50,31 +19,32 @@ def _load_manifest(path: Path) -> set[str]:
     return {entry for entry in entries if isinstance(entry, str)}
 
 
-def _write_manifest(path: Path, files: set[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"schema": 1, "files": sorted(files)}, indent=2) + "\n"
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=path.parent, delete=False
-    ) as handle:
-        handle.write(payload)
-        temporary = Path(handle.name)
-    os.replace(temporary, path)
+def remove_legacy_managed_files(root: Path, manifest: Path) -> None:
+    """Remove files copied by the pre-layering deployment wrapper.
 
+    The manifests contain only paths that the old wrapper managed. Runtime
+    state (stores, sessions, strategy config and learnings) was never listed,
+    so it remains untouched while the official stock tree moves back to
+    ``/app/agents``.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    for relative in sorted(_load_manifest(manifest)):
+        candidate = Path(relative)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            continue
+        target = root / candidate
+        if target.is_file() or target.is_symlink():
+            target.unlink()
 
-def sync_tree(source: Path, destination: Path, manifest: Path) -> None:
-    current = _managed_files(source)
-    previous = _load_manifest(manifest)
-    destination.mkdir(parents=True, exist_ok=True)
+        parent = target.parent
+        while parent != root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
 
-    for relative, source_file in current.items():
-        _atomic_copy(source_file, destination / relative)
-
-    for relative in sorted(previous - set(current)):
-        stale = destination / relative
-        if stale.is_file() or stale.is_symlink():
-            stale.unlink()
-
-    _write_manifest(manifest, set(current))
+    manifest.unlink(missing_ok=True)
 
 
 def ensure_config(path: Path) -> None:
@@ -114,17 +84,14 @@ def ensure_config(path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
     args = parser.parse_args()
 
-    sync_tree(
-        args.assets / "agents",
+    remove_legacy_managed_files(
         args.state / "agents",
         args.state / ".managed-agents.json",
     )
-    sync_tree(
-        args.assets / "routines",
+    remove_legacy_managed_files(
         args.state / "routines",
         args.state / ".managed-routines.json",
     )

@@ -86,11 +86,6 @@ COPY --from=frontend /src/frontend/dist /app/frontend/dist
 COPY entrypoint.sh sync_assets.py /opt/condor-deploy/
 
 RUN uv sync --frozen --offline --no-dev \
-    && mkdir -p /opt/condor-assets \
-    && mv /app/agents /opt/condor-assets/agents \
-    && mv /app/routines /opt/condor-assets/routines \
-    && ln -s /state/agents /app/agents \
-    && ln -s /state/routines /app/routines \
     && ln -s /state/config.yml /app/config.yml \
     && ln -s /state/audit_log.yml /app/audit_log.yml \
     && chmod 0755 /opt/condor-deploy/entrypoint.sh

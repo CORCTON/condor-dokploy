@@ -137,15 +137,16 @@ services:
       ADMIN_USER_ID: ${TELEGRAM_ADMIN_USER_ID:?required}
       WEB_HOST: 0.0.0.0
       WEB_URL: https://desktop.corcton.com
-      CONDOR_DEFAULT_AGENT: custom:glm-5.2
+      CONDOR_DEFAULT_AGENT: custom:swe-2-high
       CUSTOM_LLM_BASE_URL: http://windsurf2api:3003/v1
       CUSTOM_LLM_API_KEY: ${WINDSURF_API_KEY:?required}
-      CONSULT_FALLBACK_MODEL: ""
+      AGENT_FALLBACK_MODEL: custom:swe-2-high
       PYDANTIC_AI_TOOL_FILTER: full
       UPDATE_CHECK_INTERVAL: "0"
       CONDOR_DATA_DIR: /state/data
       CONDOR_RUNTIME_ROOT: /state/runtime
       CONDOR_AGENTS_ROOT: /state/agents
+      CONDOR_STOCK_AGENTS_ROOT: /app/agents
       CONDOR_SHARING: "off"
       CONDOR_TELEMETRY: "off"
       HUMMINGBOT_API_HOST: hummingbot-api
