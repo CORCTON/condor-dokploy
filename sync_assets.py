@@ -3,12 +3,56 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
+import pickle
+import shutil
 import tempfile
 from pathlib import Path
 
 import yaml
+
+LEGACY_TELEGRAM_MODELS = {"custom:glm-5.2", "custom:glm-5-2"}
+
+
+def migrate_telegram_admin_model(state: Path) -> bool:
+    """Move only the admin's old Telegram GLM choice to the deployed default."""
+    path = state / "data" / "condor_bot_data.pickle"
+    if not path.exists() or not os.environ.get("TELEGRAM_TOKEN"):
+        return False
+
+    from telegram.ext import ExtBot
+    from telegram.ext._picklepersistence import _BotPickler, _BotUnpickler
+
+    bot = ExtBot(token=os.environ["TELEGRAM_TOKEN"])
+    with path.open("rb") as handle:
+        data = _BotUnpickler(bot, handle).load()
+    admin_id = int(os.environ["ADMIN_USER_ID"])
+    admin = data.get("user_data", {}).get(admin_id)
+    if (
+        not isinstance(admin, dict)
+        or admin.get("agent_llm") not in LEGACY_TELEGRAM_MODELS
+    ):
+        return False
+
+    target = os.environ["CONDOR_DEFAULT_AGENT"]
+    admin["agent_llm"] = target
+    agent_prefs = admin.setdefault("user_preferences", {}).setdefault("agent", {})
+    agent_prefs["active_agent_key"] = target
+    if agent_prefs.get("default_agent") in LEGACY_TELEGRAM_MODELS:
+        agent_prefs["default_agent"] = target
+
+    buffer = io.BytesIO()
+    _BotPickler(bot, buffer, protocol=pickle.HIGHEST_PROTOCOL).dump(data)
+    backup = path.with_suffix(".pickle.pre-swe2.bak")
+    if not backup.exists():
+        shutil.copy2(path, backup)
+    from condor.fsutil import atomic_write_bytes
+
+    atomic_write_bytes(path, buffer.getvalue())
+    return True
+
 
 def _load_manifest(path: Path) -> set[str]:
     try:
@@ -72,6 +116,13 @@ def ensure_config(path: Path) -> None:
     config.setdefault("telemetry", {})["consent"] = "denied"
     config.setdefault("sharing", {})["enabled"] = False
 
+    admin_prefs = config.get("user_preferences", {}).get(config["admin_id"], {})
+    agent_prefs = admin_prefs.get("agent", {})
+    if agent_prefs.get("active_agent_key") in LEGACY_TELEGRAM_MODELS:
+        agent_prefs["active_agent_key"] = os.environ["CONDOR_DEFAULT_AGENT"]
+    if agent_prefs.get("default_agent") in LEGACY_TELEGRAM_MODELS:
+        agent_prefs["default_agent"] = os.environ["CONDOR_DEFAULT_AGENT"]
+
     path.parent.mkdir(parents=True, exist_ok=True)
     rendered = yaml.safe_dump(config, sort_keys=False)
     with tempfile.NamedTemporaryFile(
@@ -96,6 +147,8 @@ def main() -> None:
         args.state / ".managed-routines.json",
     )
     ensure_config(args.state / "config.yml")
+    if migrate_telegram_admin_model(args.state):
+        print("Migrated Telegram admin model to CONDOR_DEFAULT_AGENT", flush=True)
 
 
 if __name__ == "__main__":
