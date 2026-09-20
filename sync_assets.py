@@ -48,9 +48,12 @@ def migrate_telegram_admin_model(state: Path) -> bool:
     backup = path.with_suffix(".pickle.pre-swe2.bak")
     if not backup.exists():
         shutil.copy2(path, backup)
-    from condor.fsutil import atomic_write_bytes
-
-    atomic_write_bytes(path, buffer.getvalue())
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+        handle.write(buffer.getvalue())
+        handle.flush()
+        os.fsync(handle.fileno())
+        temporary = Path(handle.name)
+    os.replace(temporary, path)
     return True
 
 
