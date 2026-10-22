@@ -74,6 +74,23 @@ class Store:
         row = self.db.execute("SELECT data FROM trades WHERE id=?", (key,)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def reply_trade(self, channel, message):
+        seen = set()
+        while message and message not in seen and len(seen) < 20:
+            seen.add(message)
+            matches = [
+                t for t in self.trades() if t["channel"] == channel and t["message"] == message
+            ]
+            if matches:
+                return matches[0]
+            row = self.db.execute(
+                "SELECT payload FROM events WHERE channel=? AND message=? "
+                "ORDER BY received DESC LIMIT 1",
+                (channel, message),
+            ).fetchone()
+            message = json.loads(row[0]).get("reply") if row else None
+        return None
+
     def operation(self, key):
         row = self.db.execute("SELECT * FROM operations WHERE id=?", (key,)).fetchone()
         return dict(row) if row else None

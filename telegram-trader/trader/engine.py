@@ -88,11 +88,8 @@ class Engine:
     async def process(self, event):
         async with self.lock:
             payload = json.loads(event["payload"])
-            replied = [
-                t
-                for t in self.store.trades()
-                if t["channel"] == event["channel"] and t["message"] == payload["reply"]
-            ]
+            reference = self.store.reply_trade(event["channel"], payload["reply"])
+            replied = [reference] if reference else []
             signal = parse(
                 payload["text"], replied[0]["symbol"].removesuffix("_USDT") if replied else None
             )

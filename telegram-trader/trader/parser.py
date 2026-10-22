@@ -65,7 +65,10 @@ def parse(text: str, reply_symbol: str | None = None) -> Signal:
             r"TP([12])\s*(?:放在|设为|设置|移到|:|到|在)?\s*" + _NUMBER, text, re.IGNORECASE
         )
     }
-    opening = re.search(r"(?:当前价(?:格)?|市价|现价).{0,10}(?:入场|进场|开仓)", text)
+    side_match = re.search(r"(多|空)单", text)
+    opening = (
+        side_match and re.search(r"入场|进场|开仓", text) and not re.search(r"补仓|加仓", text)
+    )
     if targets and not opening:
         if stop:
             targets["sl"] = stop[1]
@@ -89,7 +92,6 @@ def parse(text: str, reply_symbol: str | None = None) -> Signal:
         return Signal(action="sl" if symbol else "review", symbol=symbol, price=stop[1])
     if re.search(r"均价|我的开仓价|持仓均价|拿下利润|成功|收益|利润不错", text):
         return Signal(action="ignore", symbol=symbol, reason="position report, not an instruction")
-    side_match = re.search(r"(多|空)单", text)
     if side_match and re.search(r"入场|进场|开仓|做[多空]", text):
         if not symbol:
             return Signal(action="review", reason="symbol missing")
@@ -103,7 +105,13 @@ def parse(text: str, reply_symbol: str | None = None) -> Signal:
             )
         price = re.search(r"(?:在|价格|价位|限价)\s*" + _NUMBER, text)
         if price:
-            return Signal(action="open", symbol=symbol, side=side, price=price[1])
+            return Signal(
+                action="open",
+                symbol=symbol,
+                side=side,
+                price=price[1],
+                levels=targets | ({"sl": stop[1]} if stop else {}),
+            )
         return Signal(action="review", symbol=symbol, reason="entry type/price missing")
     if re.search(
         r"入场|进场|开仓|平仓|止损|止盈|减仓|补仓|加仓|TP[12]|\bSL\b", text, re.IGNORECASE

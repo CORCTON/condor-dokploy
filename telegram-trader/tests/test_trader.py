@@ -368,6 +368,19 @@ def test_nontrading_question_is_ignored():
     assert parse("大家吃饭了吗？").action == "ignore"
 
 
+def test_limit_entry_with_levels_stays_an_entry():
+    result = parse("#INJ 在10限价入场空单 TP1:9 TP2:8 SL:11")
+    assert result.action == "open" and result.price == "10"
+    assert result.levels == {"tp1": "9", "tp2": "8", "sl": "11"}
+
+
+async def test_management_reply_chain_resolves_original_trade(rig):
+    await signal(rig)
+    await signal(rig, "我的开仓价：10", message=2, reply=1)
+    await signal(rig, "全部平仓", message=3, reply=2)
+    assert rig[1].position["size"] == 0
+
+
 async def test_close_partial_ioc_retries_only_after_terminal(rig):
     await signal(rig)
     rig[1].partial = 7
