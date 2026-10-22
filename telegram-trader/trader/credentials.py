@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
-from eth_keyfile import decode_keyfile_json
 
 CONNECTOR = "gate_io_perpetual"
 SAVED_PATH = Path("/hummingbot-credentials") / f"{CONNECTOR}.yml"
@@ -57,6 +56,8 @@ def load_credentials(*, environment=None, path=SAVED_PATH):
         if not password:
             return unavailable("HUMMINGBOT_CONFIG_PASSWORD missing")
         try:
+            from eth_keyfile import decode_keyfile_json
+
             config = yaml.safe_load(path.read_text())
             if config.get("connector") != CONNECTOR:
                 return unavailable("Saved Hummingbot connector does not match gate_io_perpetual")

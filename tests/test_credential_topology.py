@@ -7,6 +7,7 @@ def test_trader_reuses_encrypted_account_and_password_without_other_host_access(
     compose = yaml.safe_load((Path(__file__).parents[1] / "docker-compose.yml").read_text())
     services = compose["services"]
     trader = services["telegram-trader"]
+    assert trader["mem_limit"] == "384m"
     assert trader["environment"]["HUMMINGBOT_CONFIG_PASSWORD"] == (
         services["hummingbot-api"]["environment"]["CONFIG_PASSWORD"]
     )
