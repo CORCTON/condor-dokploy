@@ -59,12 +59,15 @@ Telegram chat is bound to TelegramAgent on startup.
 ## Safety and execution contract
 
 - Initial margin budget: 20% × (classic USDT futures balance + unrealised PnL).
-  Fixed isolated 12x. Contract counts round down; market slippage and fees mean
+  Fixed isolated 7x. Contract counts round down; market slippage and fees mean
   the actual margin debit need not exactly equal that budget.
 - Only explicit text market/limit entries; no breakout monitoring or add-ons.
   Same-symbol active positions are not merged. Use a dedicated, one-way,
-  classic USDT futures account. Decimal-contract/evolved/unified account modes
-  are rejected until separately implemented and validated.
+  classic USDT futures account (`margin_mode=0`, `position_mode=single`).
+  Decimal contracts and other account modes are rejected. The deprecated
+  `enable_evolved_classic` field is not used to infer account mode. Leverage is
+  set explicitly with `set_leverage` and `margin_mode=isolated`, then verified
+  using the returned position's `pos_margin_mode`, `mode`, and `lever` fields.
 - No initial stop is invented. No timed position close. AI plans are schema-,
   version-, direction- and tick-checked. Channel numeric levels take precedence.
 - Native reduce-only TP limits and full-position mark-price SL triggers.

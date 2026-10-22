@@ -36,9 +36,18 @@ class Exchange:
             "unrealised_pnl": "0",
             "available": "100",
             "margin_mode": 0,
+            "position_mode": "single",
         }
         self.contract = copy.deepcopy(CONTRACT)
-        self.position = {"size": 0, "leverage": "12", "mark_price": "10", "entry_price": "10"}
+        self.position = {
+            "size": 0,
+            "leverage": "0",
+            "lever": "7",
+            "pos_margin_mode": "isolated",
+            "mode": "single",
+            "mark_price": "10",
+            "entry_price": "10",
+        }
         self.orders, self.stops, self.writes = {}, {}, []
         self.lost_response = False
         self.partial = None
@@ -47,8 +56,9 @@ class Exchange:
         if method == "GET":
             return await self.get(path, **(params or {}))
         self.writes.append((method, path, copy.deepcopy(body), params))
-        if path.endswith("/leverage"):
-            self.position["leverage"] = params["leverage"]
+        if path.endswith("/set_leverage"):
+            self.position["lever"] = params["leverage"]
+            self.position["pos_margin_mode"] = params["margin_mode"]
             return dict(self.position)
         if method == "POST" and path == "/orders":
             key = str(len(self.orders) + 1)
@@ -76,9 +86,11 @@ class Exchange:
             self.stops[key] = result
             return dict(result)
         if method == "PUT" and path.startswith("/price_orders/amend/"):
+            if "price" not in body:
+                raise GateError(400, "AUTO_INVALID_PARAM_PRICE")
             result = self.stops[path.rsplit("/", 1)[1]]
             result["trigger"]["price"] = body["trigger_price"]
-            return dict(result)
+            return int(result["id"])
         if method == "PUT" and path.startswith("/orders/"):
             result = self.orders[path.rsplit("/", 1)[1]]
             already_filled = abs(result["size"]) - abs(result["left"])
@@ -169,8 +181,8 @@ def test_parser(text, action, symbol):
 
 
 def test_sizing_equity_not_available():
-    assert size_order("100", "25", "10", CONTRACT) == (24, "20.0")
-    assert size_order("125", "100", "10", CONTRACT) == (30, "25.0")
+    assert size_order("100", "25", "10", CONTRACT) == (14, "20.0")
+    assert size_order("125", "100", "10", CONTRACT) == (17, "25.0")
     with pytest.raises(Review, match="insufficient"):
         size_order("100", "20", "10", CONTRACT)
 
@@ -184,10 +196,10 @@ def test_invalid_values(price):
 async def test_entry_immediate_without_ai_or_stop(rig):
     store, exchange, _ = rig
     trade = await signal(rig)
-    assert trade["filled"] == 24
+    assert trade["filled"] == 14
     assert trade["entry_price"] == "10"
     assert trade["plan_needed"] is True
-    assert exchange.position["size"] == -24
+    assert exchange.position["size"] == -14
     assert not exchange.stops
     assert len(exchange.orders) == 1
     assert store.db.execute("SELECT status FROM events").fetchone()[0] == "done"
@@ -196,7 +208,7 @@ async def test_entry_immediate_without_ai_or_stop(rig):
 async def test_equity_includes_upl(rig):
     rig[1].account["unrealised_pnl"] = "25"
     trade = await signal(rig)
-    assert trade["lots"] == 30 and trade["equity"] == "125"
+    assert trade["lots"] == 17 and trade["equity"] == "125"
 
 
 async def test_duplicate_and_edited_entry_never_resends(rig):
@@ -227,7 +239,7 @@ async def test_disabled_never_trades(rig):
     "field,value",
     [
         ("in_dual_mode", True),
-        ("enable_evolved_classic", True),
+        ("position_mode", "dual"),
         ("margin_mode", 1),
         ("currency", "BTC"),
     ],
@@ -247,7 +259,7 @@ async def test_unmanaged_position_never_adopted(rig):
 async def test_partial_fill_is_not_ack_size(rig):
     rig[1].partial = 7
     trade = await signal(rig)
-    assert trade["lots"] == 24 and trade["filled"] == 7
+    assert trade["lots"] == 14 and trade["filled"] == 7
     job = await rig[2].claim_plan()
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     trade = rig[0].trade(trade["id"])
@@ -260,9 +272,9 @@ async def test_lost_entry_response_reconciles_without_resend(rig):
     exchange.lost_response = True
     trade = await signal(rig)
     assert engine.paused() and len(store.unknowns()) == 1
-    assert exchange.position["size"] == -24
+    assert exchange.position["size"] == -14
     await engine.poll()
-    assert store.trade(trade["id"])["filled"] == 24
+    assert store.trade(trade["id"])["filled"] == 14
     assert len(exchange.orders) == 1
     assert not store.unknowns()
     assert engine.paused()  # recovery is not permission to create more risk
@@ -284,7 +296,7 @@ async def test_restart_reuses_durable_intents(rig):
     trade = await signal(rig)
     restarted = Engine(store, exchange, True)
     await restarted.poll()
-    assert store.trade(trade["id"])["filled"] == 24
+    assert store.trade(trade["id"])["filled"] == 14
     assert len(exchange.orders) == 1
 
 
@@ -320,7 +332,7 @@ async def test_close_cancels_pending_limit_before_market(rig):
     trade = await signal(rig, "#INJ 在10限价入场空单")
     exchange = rig[1]
     entry = exchange.orders[trade["entry_id"]]
-    entry["left"] = 20
+    entry["left"] = 10
     exchange.position["size"] = -4
     await rig[2].poll()
     await signal(rig, "全部平仓", message=2, reply=1)
@@ -385,7 +397,7 @@ async def test_close_partial_ioc_retries_only_after_terminal(rig):
     await signal(rig)
     rig[1].partial = 7
     await signal(rig, "全部平仓", message=2, reply=1)
-    assert rig[1].position["size"] == -17
+    assert rig[1].position["size"] == -7
     for _ in range(6):
         await rig[2].poll()
     assert rig[1].position["size"] == 0
@@ -400,9 +412,9 @@ async def test_tp_partial_ioc_completes_without_over_reduction(rig):
     await signal(rig, "INJ 当前价格做TP1", message=2)
     for _ in range(4):
         await rig[2].poll()
-    assert rig[1].position["size"] == -12
+    assert rig[1].position["size"] == -7
     await signal(rig, "INJ 当前价格做TP1", message=3)
-    assert rig[1].position["size"] == -12
+    assert rig[1].position["size"] == -7
 
 
 async def test_channel_tp_levels_override_plan_and_amend_orders(rig):
@@ -419,17 +431,17 @@ async def test_channel_tp_levels_override_plan_and_amend_orders(rig):
 async def test_later_limit_fills_resize_exits(rig):
     trade = await signal(rig, "#INJ 在10限价入场空单")
     entry = rig[1].orders[trade["entry_id"]]
-    entry["left"] = 14
+    entry["left"] = 4
     rig[1].position["size"] = -10
     await rig[2].poll()
     job = await rig[2].claim_plan()
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     entry["left"] = 0
     entry["status"] = "finished"
-    rig[1].position["size"] = -24
+    rig[1].position["size"] = -14
     await rig[2].poll()
-    assert rig[1].orders["2"]["size"] == 12
-    assert rig[1].orders["3"]["size"] == 12
+    assert rig[1].orders["2"]["size"] == 7
+    assert rig[1].orders["3"]["size"] == 7
 
 
 async def test_stop_renewal_creates_before_cancelling(rig):
@@ -458,8 +470,8 @@ async def test_no_model_call_can_change_leverage(rig):
     await signal(rig)
     job = await rig[2].claim_plan()
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], plan())
-    assert [p for m, p, _, _ in rig[1].writes if p.endswith("/leverage")] == [
-        "/positions/INJ_USDT/leverage"
+    assert [p for m, p, _, _ in rig[1].writes if p.endswith("/set_leverage")] == [
+        "/positions/INJ_USDT/set_leverage"
     ]
 
 
@@ -527,3 +539,68 @@ async def test_sl_receipt_crash_recovers_existing_stop(rig):
     await rig[2].poll()
     assert rig[0].trades()[0]["exits"]["sl"]["id"] == "100"
     assert len(rig[1].stops) == 1
+
+
+async def test_deprecated_account_flag_does_not_reject_classic(rig):
+    rig[1].account["enable_evolved_classic"] = True
+    await signal(rig)
+    assert len(rig[1].orders) == 1
+    assert rig[1].writes[0][3] == {"leverage": "7", "margin_mode": "isolated"}
+
+
+@pytest.mark.parametrize("field", ["margin_mode", "position_mode"])
+async def test_missing_account_mode_fails_closed(rig, field):
+    rig[1].account.pop(field, None)
+    await signal(rig)
+    assert not rig[1].writes
+
+
+@pytest.mark.parametrize(
+    "field,value", [("pos_margin_mode", "cross"), ("lever", "12"), ("mode", "dual_long")]
+)
+async def test_changed_position_mode_does_not_send_orders(rig, field, value):
+    await signal(rig)
+    rig[1].position[field] = value
+    before = len(rig[1].writes)
+    await signal(rig, "全部平仓", message=2, reply=1)
+    assert len(rig[1].writes) == before
+    assert rig[2].paused()
+
+
+@pytest.mark.parametrize("side", ["long", "short"])
+async def test_native_stop_complete_lifecycle(rig, side):
+    direction = "多" if side == "long" else "空"
+    trade = await signal(rig, f"#INJ 当前价格入场一笔{direction}单")
+    job = await rig[2].claim_plan()
+    exit_plan = (
+        Plan(sl="9", tp1="11", tp2="12", tp1_fraction="0.5", rationale="fixture")
+        if side == "long"
+        else plan()
+    )
+    await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], exit_plan)
+    rig[1].stops["100"].update(status="finished", finish_as="succeeded")
+    rig[1].position["size"] = 3 if side == "long" else -3
+    for _ in range(3):
+        await rig[2].poll()
+    assert rig[1].position["size"] == 0
+    assert rig[0].trade(trade["id"])["status"] == "closed"
+    assert not await rig[1].get("/orders", status="open")
+    assert not await rig[1].get("/price_orders", status="open")
+    assert not rig[0].unknowns()
+
+
+async def test_stop_amend_preserves_market_full_close(rig):
+    await signal(rig)
+    await signal(rig, "INJ SL: 11", message=2)
+    await signal(rig, "INJ SL: 10.5", message=3)
+    operation = rig[0].db.execute("SELECT status,detail FROM events WHERE message=3").fetchone()
+    assert operation["status"] == "done", operation["detail"]
+    body = rig[1].writes[-1][2]
+    assert body == {
+        "order_id": 100,
+        "size": 0,
+        "price": "0",
+        "close": True,
+        "trigger_price": "10.5",
+        "price_type": 1,
+    }

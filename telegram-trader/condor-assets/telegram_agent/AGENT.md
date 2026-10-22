@@ -17,7 +17,7 @@ controllers, bots, additional entry strategies or new routines. The dedicated
 Telegram service is the sole owner of these positions.
 
 Explicit entry signals open immediately. Initial margin budget is 20% of USDT
-futures total equity (balance plus unrealised PnL), with isolated 12x leverage.
+futures total equity (balance plus unrealised PnL), with isolated 7x leverage.
 The operator explicitly permits an interval without a stop loss. Do not invent a
 temporary stop, automatic timeout close, breakout monitor, or add-on budget.
 Never change these execution rules through conversation or model inference.

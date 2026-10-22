@@ -10,6 +10,8 @@ from .models import Plan
 from .models import decimal as D
 from .parser import parse
 
+LEVERAGE = 7
+
 
 class Review(Exception):
     """Do not infer or retry an unsafe/ambiguous operation."""
@@ -19,6 +21,14 @@ def tag(key):
     return "t-cdt-" + hashlib.sha256(key.encode()).hexdigest()[:22]
 
 
+def isolated_position(position):
+    return (
+        position.get("pos_margin_mode") == "isolated"
+        and position.get("mode") == "single"
+        and D(position.get("lever", 0)) == LEVERAGE
+    )
+
+
 def size_order(equity, available, price, contract):
     equity, available, price = D(equity), D(available), D(price)
     multiplier = D(contract["quanto_multiplier"])
@@ -26,10 +36,10 @@ def size_order(equity, available, price, contract):
         raise Review("invalid equity/price/multiplier")
     if contract.get("enable_decimal") or contract.get("in_delisting"):
         raise Review("decimal-size or delisting contracts are not supported")
-    if D(contract["leverage_max"]) < 12:
-        raise Review("contract does not support 12x")
+    if D(contract["leverage_max"]) < LEVERAGE:
+        raise Review(f"contract does not support {LEVERAGE}x")
     margin = equity * Decimal("0.2")
-    lots = int((margin * 12 / (price * multiplier)).to_integral_value(rounding=ROUND_DOWN))
+    lots = int((margin * LEVERAGE / (price * multiplier)).to_integral_value(rounding=ROUND_DOWN))
     if not int(contract["order_size_min"]) <= lots <= int(contract["order_size_max"]):
         raise Review("size outside exchange limits; will not silently resize")
     fee = D(contract["taker_fee_rate"])
@@ -162,9 +172,8 @@ class Engine:
         if (
             account.get("currency") != "USDT"
             or account.get("in_dual_mode") is not False
-            or account.get("enable_evolved_classic") is not False
-            or account.get("margin_mode", 0) != 0
-            or account.get("position_mode", "single") != "single"
+            or account.get("margin_mode") != 0
+            or account.get("position_mode") != "single"
         ):
             raise Review(
                 "requires classic USDT futures, one-way mode; account mode will not be changed"
@@ -218,12 +227,12 @@ class Engine:
                 trade,
                 trade_id + ":leverage",
                 "POST",
-                f"/positions/{symbol}/leverage",
-                params={"leverage": "12"},
+                f"/positions/{symbol}/set_leverage",
+                params={"leverage": str(LEVERAGE), "margin_mode": "isolated"},
             )
             verified = await self.gate.get(f"/positions/{symbol}")
-            if D(verified["leverage"]) != 12 or D(verified["size"]) != 0:
-                raise Review("isolated 12x could not be verified")
+            if not isolated_position(verified) or D(verified["size"]) != 0:
+                raise Review(f"isolated {LEVERAGE}x could not be verified")
             body = {
                 "contract": symbol,
                 "size": lots if signal.side == "long" else -lots,
@@ -237,7 +246,7 @@ class Engine:
             trade["status"] = "working"
             self.store.save_trade(trade)
             self.store.notice(
-                f"Entry accepted: {symbol} {signal.side}, {lots} contracts, isolated 12x. "
+                f"Entry accepted: {symbol} {signal.side}, {lots} contracts, isolated {LEVERAGE}x. "
                 f"Margin budget {margin} USDT (20% of equity {equity}). Fill not yet confirmed; no SL yet."
             )
             await self.refresh(trade)
@@ -291,7 +300,7 @@ class Engine:
         position = await self.gate.get(f"/positions/{trade['symbol']}")
         size = D(position["size"])
         sign = 1 if trade["side"] == "long" else -1
-        if size * sign < 0 or abs(size) > trade["lots"] or D(position["leverage"]) != 12:
+        if size * sign < 0 or abs(size) > trade["lots"] or not isolated_position(position):
             self.pause("position ownership/mode mismatch")
             raise Review("position ownership/mode mismatch; no orders sent")
         if size != size.to_integral_value():
@@ -429,7 +438,14 @@ class Engine:
                 key,
                 "PUT",
                 f"/price_orders/amend/{existing['id']}",
-                {"order_id": int(existing["id"]), "trigger_price": str(price), "price_type": 1},
+                {
+                    "order_id": int(existing["id"]),
+                    "size": 0,
+                    "price": "0",
+                    "close": True,
+                    "trigger_price": str(price),
+                    "price_type": 1,
+                },
             )
             existing["price"] = str(price)
         else:
