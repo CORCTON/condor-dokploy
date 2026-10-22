@@ -25,8 +25,10 @@ not used by this extension. All services/data that already exist are retained.
 
 The entry path is Telethon update → durable SQLite event → deterministic text
 parser → Gate REST order. It does **not** wait for the LLM, Web UI or a Condor
-conversation lock. Condor's official continuous Routine and `/agents/.../ask`
-API fill exit parameters asynchronously after an actual fill. The admin's
+conversation lock. Condor's official continuous Routine, Agent context and LLM
+client factory fill exit parameters asynchronously after an actual fill. This
+background client mounts no MCP servers/tools; only its validated JSON plan can
+reach the execution service. The admin's
 Telegram chat is bound to TelegramAgent on startup.
 
 ## Safety and execution contract

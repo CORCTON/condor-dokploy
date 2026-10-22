@@ -16,9 +16,37 @@ class Config(BaseModel):
     pass
 
 
+async def generate_plan(job, owner):
+    from condor.acp.client import PromptDone, TextChunk
+    from condor.acp.pydantic_ai_client import is_pydantic_ai_model
+    from condor.agents.agent import AgentStore
+    from condor.runtime import context as runtime_context
+    from condor.runtime.llm_client import build_llm_client
+
+    agent = AgentStore().get("telegram_agent")
+    if agent is None or not is_pydantic_ai_model(agent.agent_key):
+        raise ValueError("Exit planner requires a configured API model, not a shell/ACP agent")
+    # Use Condor's provider resolution and Agent context, but attach NO MCP
+    # servers. Untrusted channel text cannot induce a model-side tool action.
+    client = build_llm_client(agent.agent_key, mcp_servers=[], user_id=owner)
+    task = "EXIT_PLAN_JOB\nReturn only the prescribed JSON exit plan.\n" + json.dumps(job)
+    prompt = runtime_context.build_agent_context(agent, owner, task, "")
+    chunks, reason = [], ""
+    try:
+        await client.start()
+        async for event in client.prompt_stream(prompt):
+            if isinstance(event, TextChunk):
+                chunks.append(event.text)
+            elif isinstance(event, PromptDone):
+                reason = event.stop_reason
+    finally:
+        await client.stop()
+    if reason != "end_turn":
+        raise RuntimeError("Exit planner did not complete normally")
+    return json.loads("".join(chunks))
+
+
 async def run(config: Config, context):
-    from condor.web.auth import create_jwt
-    from utils.config import WEB_PORT
 
     trader_url = os.environ["TELEGRAM_TRADER_URL"].rstrip("/")
     trader_headers = {"Authorization": "Bearer " + os.environ["TRADER_TOKEN"]}
@@ -41,19 +69,7 @@ async def run(config: Config, context):
                 if not job:
                     await asyncio.sleep(1)
                     continue
-                prompt = "EXIT_PLAN_JOB\nReturn only the prescribed JSON exit plan.\n" + json.dumps(
-                    job
-                )
-                headers = {"Authorization": "Bearer " + create_jwt(owner, role="user")}
-                async with session.post(
-                    f"http://127.0.0.1:{WEB_PORT}/api/v1/agents/telegram_agent/ask",
-                    json={"task": prompt, "server_name": "main", "caller": "telegram-exit-planner"},
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=90),
-                ) as response:
-                    response.raise_for_status()
-                    answer = await response.json()
-                plan = json.loads(answer["answer"])
+                plan = await asyncio.wait_for(generate_plan(job, owner), timeout=90)
                 async with session.post(
                     trader_url + "/plans",
                     headers=trader_headers,
