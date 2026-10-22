@@ -18,12 +18,18 @@ class Gate:
         self.session, self.key, self.secret = session, key, secret
         self.base = "https://api-testnet.gateapi.io" if testnet else "https://api.gateio.ws"
 
+    @property
+    def ready(self):
+        return bool(self.key and self.secret)
+
     async def request(self, method, path, body=None, params=None, private=True):
         path = "/api/v4/futures/usdt" + path
         query = urlencode(params or {})
         raw = json.dumps(body, separators=(",", ":")) if body is not None else ""
         headers = {"Content-Type": "application/json"}
         if private:
+            if not self.ready:
+                raise GateError(503, "CREDENTIALS_UNAVAILABLE")
             timestamp = str(int(time.time()))
             payload = "\n".join(
                 [method, path, query, hashlib.sha512(raw.encode()).hexdigest(), timestamp]

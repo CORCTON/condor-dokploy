@@ -244,6 +244,8 @@ services:
       TRADER_ENABLED: ${TRADER_ENABLED:-false}
       TRADER_TOKEN: ${TRADER_TOKEN:?required}
       GATE_ENVIRONMENT: ${GATE_ENVIRONMENT:-testnet}
+      GATE_CREDENTIAL_SOURCE: ${GATE_CREDENTIAL_SOURCE:-hummingbot}
+      HUMMINGBOT_CONFIG_PASSWORD: ${HUMMINGBOT_CONFIG_PASSWORD:?required}
       GATE_API_KEY: ${GATE_API_KEY:-}
       GATE_API_SECRET: ${GATE_API_SECRET:-}
       TG_API_ID: ${TG_API_ID:-}
@@ -255,6 +257,7 @@ services:
       TELEGRAM_ADMIN_USER_ID: ${TELEGRAM_ADMIN_USER_ID:?required}
     volumes:
       - telegram-trader-state:/state
+      - /var/lib/condor-spot/bots/credentials/${HUMMINGBOT_ACCOUNT_NAME:-master_account}/connectors:/hummingbot-credentials:ro
     networks:
       - condor-internal
     healthcheck:

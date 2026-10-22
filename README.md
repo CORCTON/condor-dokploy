@@ -122,7 +122,7 @@ Stopping the Routine terminates that worker and its MCP process group.
 - Private API port is internal only, token-authenticated, with no entry or live
   activation endpoint. A decision submission requires a current durable analysis
   lease and complete event coverage; it is not a free-form order endpoint.
-  Exchange keys exist only in the execution container.
+  Exchange keys are never exposed through model tools or status responses.
   Only Condor polls the existing Telegram bot; the service only sends notices.
 
 ## Configuration (all live trading disabled by default)
@@ -140,8 +140,9 @@ Required from the operator:
    mounted at `/state/telegram.session`, plus the exact `TG_CHANNEL_ID` and
    optional public `TG_CHANNEL` username. A bot token cannot read a subscribed
    channel that has not added the bot. Never commit or paste the session publicly.
-2. Gate USDT perpetual API key/secret, testnet/live choice, supported account mode,
-   and confirmation that this is a dedicated account. No withdrawal permission.
+2. An existing Hummingbot `gate_io_perpetual` credential, testnet/live choice,
+   supported account mode, and confirmation that this is a dedicated account.
+   No withdrawal permission. See credential reuse below; no second live key is needed.
 3. An OpenAI-compatible provider's `LLM_BASE_URL`, `LLM_API_KEY` and
    `TRADER_AGENT_MODEL=custom:<model-id>`. Confirm it supports tool calling.
 
@@ -152,6 +153,34 @@ close tests and a measured end-to-end latency test. Unit tests cannot establish
 real exchange behavior or promise a seconds-level production latency.
 The previous sub-second parser-to-order measurements do **not** apply to this
 model-first architecture. Measure actual channel-to-model-to-exchange latency anew.
+
+### Credential reuse
+
+Compose defaults to `GATE_CREDENTIAL_SOURCE=hummingbot`. It read-only mounts
+the selected account's connector directory (`HUMMINGBOT_ACCOUNT_NAME=master_account`
+by default), not the full Hummingbot bots volume or Docker socket. The service reads
+only `gate_io_perpetual.yml`, using Hummingbot's V3 keyfile decoding library and the
+existing `HUMMINGBOT_CONFIG_PASSWORD`. Decrypted keys remain in process memory;
+they are not copied into Dokploy environment variables, Condor, SQLite or model context.
+This gives the execution container access to the selected account's encrypted connector
+files and the shared decryption password; do not mount other accounts there.
+
+Credentials are loaded at startup. After changing/removing them in Hummingbot,
+restart `telegram-trader` to reload them (an exchange-side revocation takes effect
+independently). Loading does not enable execution or clear the persisted pause.
+Missing/invalid credentials block private Gate requests but do not stop channel analysis.
+`/status` reports only source, target environment, readiness and a sanitized error.
+
+The saved `gate_io_perpetual` connector is **live**. With `GATE_ENVIRONMENT=testnet`,
+it is deliberately rejected rather than silently changing endpoints. For isolated
+tests, explicitly select `GATE_CREDENTIAL_SOURCE=env` and supply testnet-only
+`GATE_API_KEY` / `GATE_API_SECRET`. Mixing both sources is rejected; there is no
+fallback to another account. Deployment defaults remain testnet and disabled.
+
+The existing Telegram bot/admin ID, CPA provider/model client and Hummingbot
+encryption password already have single Compose configuration sources. The
+Telethon user session (channel-reader login) and execution ledger remain separate:
+they are not interchangeable with a bot token or Hummingbot's order ownership.
 
 ## Verification
 

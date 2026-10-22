@@ -11,6 +11,7 @@ from aiohttp import web
 from telethon import TelegramClient, events, utils
 
 from .channel import ChannelReader, describe_message
+from .credentials import load_credentials
 from .engine import Engine, Review
 from .gate import Gate, GateError
 from .models import Decisions, Plan
@@ -20,18 +21,18 @@ from .store import Store
 log = logging.getLogger("trader")
 
 
-def missing_config():
+def missing_config(credentials=None):
     required = (
         "TG_API_ID",
         "TG_API_HASH",
         "TG_CHANNEL_ID",
-        "GATE_API_KEY",
-        "GATE_API_SECRET",
         "TRADER_TOKEN",
     )
     missing = [key for key in required if not os.getenv(key)]
     if not Path(os.getenv("TG_SESSION_PATH", "/state/telegram.session")).is_file():
         missing.append("TG_SESSION_PATH (authorized user session)")
+    if credentials is not None and not credentials.ready:
+        missing.append(credentials.error)
     return missing
 
 
@@ -49,7 +50,7 @@ async def auth(request, handler):
         raise web.HTTPConflict(text=str(exc)) from exc
 
 
-def make_app(engine, channel=None):
+def make_app(engine, channel=None, credentials=None):
     app = web.Application(middlewares=[auth], client_max_size=32 * 1024)
     inbox = SignalInbox(engine)
 
@@ -58,8 +59,11 @@ def make_app(engine, channel=None):
             {
                 "alive": True,
                 "enabled": engine.enabled,
-                "ready": engine.enabled and engine.listener_ready and not engine.paused(),
-                "missing": missing_config(),
+                "ready": (
+                    engine.enabled and engine.listener_ready and not engine.paused()
+                    and not missing_config(credentials)
+                ),
+                "missing": missing_config(credentials),
             }
         )
 
@@ -70,7 +74,8 @@ def make_app(engine, channel=None):
                 "paused": engine.paused(),
                 "pause_reason": engine.store.get("pause_reason", "activation required"),
                 "listener_ready": engine.listener_ready,
-                "missing": missing_config(),
+                "missing": missing_config(credentials),
+                "credentials": credentials.status() if credentials else None,
                 "planner_seen": engine.store.get("planner_seen"),
                 "interpreter_seen": engine.store.get("interpreter_seen"),
                 "pending_messages": engine.store.db.execute(
@@ -215,7 +220,7 @@ def make_app(engine, channel=None):
 
 async def listen(engine, channel):
     while True:
-        if [key for key in missing_config() if key not in {"GATE_API_KEY", "GATE_API_SECRET"}]:
+        if missing_config():
             await asyncio.sleep(10)
             continue
         channel_id = int(os.environ["TG_CHANNEL_ID"])
@@ -276,7 +281,7 @@ async def listen(engine, channel):
 
 async def reconcile(engine):
     while True:
-        if os.getenv("GATE_API_KEY") and os.getenv("GATE_API_SECRET"):
+        if engine.gate.ready:
             try:
                 await engine.poll()
             except Exception as exc:  # noqa: BLE001 -- pause new risk on any reconciliation failure
@@ -320,25 +325,26 @@ async def main():
     store = Store(state / "trader.sqlite3")
     store.recover_analysis()
     async with aiohttp.ClientSession() as session:
+        credentials = await asyncio.to_thread(load_credentials)
         gate = Gate(
             session,
-            os.getenv("GATE_API_KEY", ""),
-            os.getenv("GATE_API_SECRET", ""),
-            testnet=os.getenv("GATE_ENVIRONMENT", "testnet") == "testnet",
+            credentials.key,
+            credentials.secret,
+            testnet=credentials.environment == "testnet",
         )
-        if os.getenv("GATE_ENVIRONMENT", "testnet") not in {"testnet", "live"}:
-            raise ValueError("GATE_ENVIRONMENT must be testnet or live")
         engine = Engine(store, gate, enabled=os.getenv("TRADER_ENABLED", "false") == "true")
         if store.get("paused") is None:
             engine.pause("initial activation required")
-        if engine.active() and os.getenv("GATE_API_KEY"):
+        if engine.active() and gate.ready:
             await engine.poll()
         channel = ChannelReader()
-        runner = web.AppRunner(make_app(engine, channel))
+        runner = web.AppRunner(make_app(engine, channel, credentials))
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", 8080).start()
         log.info(
-            "Trader online; enabled=%s; missing=%s", engine.enabled, ", ".join(missing_config())
+            "Trader online; enabled=%s; missing=%s",
+            engine.enabled,
+            ", ".join(missing_config(credentials)),
         )
         try:
             await asyncio.gather(
