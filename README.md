@@ -11,12 +11,37 @@ deployment concerns do not modify Condor source.
 The official stock Agent library remains read-only at `/app/agents`; Condor's
 supported stock/local layering writes this installation's model overrides,
 strategies, memories, and sessions to `/state/agents`. The main Agent and its
-official fallback use WindsurfAPI's `swe-2-high` model.
+official fallback use the configured OpenAI-compatible provider.
 
 The dedicated `hummingbot-init` image copies the current official Hummingbot
 API bot assets into persistent storage, enables only the official
 `gate_io_paper_trade` connector, and starts its paper account with 100 USDT. No
-Gate.io credentials are required and no custom execution ledger is installed.
+Gate.io credentials are required for that stock spot-paper connector. The
+separate Telegram perpetual execution extension below has its own ledger.
+
+# CPA provider
+
+The official `eceasy/cli-proxy-api:v8.0.38` image runs without source changes.
+It has no published ports; Condor uses `http://cpa:8317/v1` on `condor-internal`.
+The version is explicit for reproducibility and can be upgraded deliberately.
+
+Provision `/var/lib/cliproxy-api/config/config.yaml` from `cpa/config.example.yaml`
+with independently generated client and management keys; keep the directory and
+file private. OAuth records persist in `cpa-auths`. The management API is available
+only on the Docker network and always needs its separate key. The panel is disabled.
+
+Set `LLM_BASE_URL=http://cpa:8317/v1`, `LLM_API_KEY=<CPA client key>`, and
+`TRADER_AGENT_MODEL=custom:swe-2(high)` in Dokploy. Re-run `telegram-trader-assets`
+and recreate Condor after changing that model. CPA's native reasoning suffix maps
+this model to Devin SWE-2 High; do not substitute a guessed model alias.
+
+Use CPA's `--devin-login --no-browser --config /config/config.yaml` login flow.
+It produces a PKCE authorization URL and accepts the authorization code, without
+requiring a public callback or management port. Authorize before enabling
+`TRADER_LLM_READY`; process health alone does not imply usable upstream credentials.
+Rotating the client key requires updating both CPA's access keys and Condor's
+`LLM_API_KEY`. Never commit the populated config or OAuth records.
+
 # Telegram channel execution extension
 
 The deployment adds `telegram-trader` and one local `telegram_agent` with two

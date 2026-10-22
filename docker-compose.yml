@@ -1,4 +1,36 @@
 services:
+  cpa:
+    image: eceasy/cli-proxy-api:v8.0.38
+    restart: unless-stopped
+    command: ["./CLIProxyAPI", "--config", "/config/config.yaml"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 384m
+    cpus: 1
+    pids_limit: 128
+    environment:
+      GOMEMLIMIT: 256MiB
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - /var/lib/cliproxy-api/config:/config
+      - cpa-auths:/auths
+      - cpa-logs:/CLIProxyAPI/logs
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8317;
+          printf "GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3;
+          read -r status <&3; [[ "$$status" == *" 200 "* ]]'
+      interval: 20s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    networks:
+      - condor-internal
+
   broker-init:
     image: alpine:3.22
     restart: "no"
@@ -129,6 +161,8 @@ services:
       context: https://github.com/CORCTON/condor-dokploy.git#main
       target: condor
     depends_on:
+      cpa:
+        condition: service_healthy
       hummingbot-api:
         condition: service_healthy
       telegram-trader-assets:
@@ -230,6 +264,10 @@ services:
       retries: 3
 
 volumes:
+  cpa-auths:
+    name: cpa-auths
+  cpa-logs:
+    name: cpa-logs
   telegram-trader-state:
     name: telegram-trader-state
   condor-extension-code:

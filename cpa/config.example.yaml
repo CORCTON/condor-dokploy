@@ -1,0 +1,26 @@
+config-version: 8
+server:
+  host: 0.0.0.0
+  port: 8317
+  max-request-body-bytes: 8388608
+management:
+  # This service has no published ports and only joins condor-internal.
+  allow-remote: true
+  secret-key: REPLACE_WITH_SEPARATE_MANAGEMENT_KEY
+  disable-control-panel: true
+access:
+  api-keys:
+    - REPLACE_WITH_CONDOR_LLM_API_KEY
+oauth:
+  auth-dir: /auths
+observability:
+  logs:
+    debug: false
+    logging-to-file: false
+    request-log: false
+    logs-max-total-size-mb: 20
+    error-logs-max-files: 3
+  usage:
+    usage-statistics-enabled: true
+plugins:
+  enabled: false
