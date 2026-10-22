@@ -76,9 +76,8 @@ class Engine:
 
     async def resume(self):
         """Operator-only control: read-only checks, no order or leverage writes."""
+        revision = self.pause_revision
         async with self.lock:
-            revision = self.pause_revision
-
             def check():
                 if not self.enabled or not self.gate.ready:
                     raise Review("执行配置或凭证未就绪，未开启跟单；请检查服务配置。")

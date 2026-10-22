@@ -113,6 +113,17 @@ async def test_pause_wins_over_in_flight_start(controlled):
     assert engine.paused() and not exchange.writes
 
 
+async def test_newer_pause_also_wins_over_start_waiting_for_engine_lock(controlled):
+    _, exchange, engine = controlled
+    async with engine.lock:
+        task = asyncio.create_task(engine.resume())
+        await asyncio.sleep(0)
+        engine.pause("newer operator pause")
+    with pytest.raises(Review, match="暂停指令"):
+        await task
+    assert engine.paused() and not exchange.writes
+
+
 async def test_old_signal_not_replayed_but_new_signal_executes_in_simulator(controlled):
     store, exchange, engine = controlled
     key = store.event(-100123, 1, "#INJ 当前价格入场一笔空单", None, time.time(), True)
