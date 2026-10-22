@@ -31,7 +31,7 @@ file private. OAuth records persist in `cpa-auths`. The management API is availa
 only on the Docker network and always needs its separate key. The panel is disabled.
 
 Set `LLM_BASE_URL=http://cpa:8317/v1`, `LLM_API_KEY=<CPA client key>`, and
-`TRADER_AGENT_MODEL=custom:swe-2(high)` in Dokploy. Re-run `telegram-trader-assets`
+`TRADER_AGENT_MODEL=custom:devin/swe-2(high)` in Dokploy. Re-run `telegram-trader-assets`
 and recreate Condor after changing that model. CPA's native reasoning suffix maps
 this model to Devin SWE-2 High; do not substitute a guessed model alias.
 
