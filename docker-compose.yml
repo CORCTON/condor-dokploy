@@ -131,16 +131,21 @@ services:
     depends_on:
       hummingbot-api:
         condition: service_healthy
+      telegram-trader-assets:
+        condition: service_completed_successfully
     environment:
       CONDOR_MODE: ${CONDOR_MODE:-telegram}
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
       ADMIN_USER_ID: ${TELEGRAM_ADMIN_USER_ID:?required}
       WEB_HOST: 0.0.0.0
       WEB_URL: https://desktop.corcton.com
-      CONDOR_DEFAULT_AGENT: custom:swe-2-high
-      CUSTOM_LLM_BASE_URL: http://windsurf2api:3003/v1
-      CUSTOM_LLM_API_KEY: ${WINDSURF_API_KEY:?required}
-      AGENT_FALLBACK_MODEL: custom:swe-2-high
+      CONDOR_DEFAULT_AGENT: ${TRADER_AGENT_MODEL:-custom:pending-provider}
+      CUSTOM_LLM_BASE_URL: ${LLM_BASE_URL:-http://127.0.0.1:9/v1}
+      CUSTOM_LLM_API_KEY: ${LLM_API_KEY:-}
+      AGENT_FALLBACK_MODEL: ${TRADER_AGENT_MODEL:-custom:pending-provider}
+      TELEGRAM_TRADER_URL: http://telegram-trader:8080
+      TRADER_TOKEN: ${TRADER_TOKEN:?required}
+      TRADER_LLM_READY: ${TRADER_LLM_READY:-false}
       PYDANTIC_AI_TOOL_FILTER: full
       UPDATE_CHECK_INTERVAL: "0"
       CONDOR_DATA_DIR: /state/data
@@ -158,6 +163,7 @@ services:
       ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:?required}
     volumes:
       - condor-state:/state
+      - condor-extension-code:/opt/condor-deploy:ro
     expose:
       - "443"
     healthcheck:
@@ -174,7 +180,60 @@ services:
       - condor-internal
       - dokploy-network
 
+  telegram-trader-assets:
+    image: corcton/telegram-trader:local
+    restart: "no"
+    command: ["python", "/bundle/install_assets.py"]
+    environment:
+      TRADER_AGENT_MODEL: ${TRADER_AGENT_MODEL:-custom:pending-provider}
+    volumes:
+      - condor-state:/condor-state
+      - condor-extension-code:/deploy
+    network_mode: none
+
+  telegram-trader:
+    image: corcton/telegram-trader:local
+    build:
+      context: https://github.com/CORCTON/condor-dokploy.git#main
+      target: telegram-trader
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 192m
+    cpus: 0.5
+    pids_limit: 64
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    environment:
+      TRADER_ENABLED: ${TRADER_ENABLED:-false}
+      TRADER_TOKEN: ${TRADER_TOKEN:?required}
+      GATE_ENVIRONMENT: ${GATE_ENVIRONMENT:-testnet}
+      GATE_API_KEY: ${GATE_API_KEY:-}
+      GATE_API_SECRET: ${GATE_API_SECRET:-}
+      TG_API_ID: ${TG_API_ID:-}
+      TG_API_HASH: ${TG_API_HASH:-}
+      TG_CHANNEL_ID: ${TG_CHANNEL_ID:-}
+      TG_CHANNEL: ${TG_CHANNEL:-}
+      TG_SESSION_PATH: /state/telegram.session
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+      TELEGRAM_ADMIN_USER_ID: ${TELEGRAM_ADMIN_USER_ID:?required}
+    volumes:
+      - telegram-trader-state:/state
+    networks:
+      - condor-internal
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
 volumes:
+  telegram-trader-state:
+    name: telegram-trader-state
+  condor-extension-code:
+    name: condor-extension-code
   condor-postgres-data:
     name: condor-postgres-data
   condor-emqx-data:

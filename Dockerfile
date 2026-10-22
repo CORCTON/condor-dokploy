@@ -83,7 +83,7 @@ RUN apt-get update \
 COPY --from=python-deps /app/.venv /app/.venv
 COPY --from=assembled /src/ /app/
 COPY --from=frontend /src/frontend/dist /app/frontend/dist
-COPY entrypoint.sh sync_assets.py /opt/condor-deploy/
+COPY entrypoint.sh sync_assets.py telegram_bootstrap.py /opt/condor-deploy/
 
 RUN uv sync --frozen --offline --no-dev \
     && ln -s /state/config.yml /app/config.yml \
@@ -94,3 +94,14 @@ EXPOSE 443
 
 ENTRYPOINT ["/opt/condor-deploy/entrypoint.sh"]
 CMD ["/app/.venv/bin/python", "main.py"]
+
+
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS telegram-trader
+WORKDIR /service
+COPY telegram-trader/pyproject.toml telegram-trader/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+COPY telegram-trader/trader ./trader
+COPY telegram-trader/condor-assets /bundle/condor-assets
+COPY telegram-trader/install_assets.py entrypoint.sh sync_assets.py telegram_bootstrap.py /bundle/
+ENV PATH="/service/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+CMD ["python", "-m", "trader.app"]
