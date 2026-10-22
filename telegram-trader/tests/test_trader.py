@@ -327,6 +327,43 @@ async def test_channel_stop_invalidates_ai_job(rig):
     assert next(iter(rig[1].stops.values()))["trigger"]["price"] == "10.50"
 
 
+async def test_plan_proposal_is_validated_without_orders_and_rechecked_on_apply(rig):
+    await signal(rig)
+    job = await rig[2].claim_plan()
+    args = [job[k] for k in ("trade_id", "version", "lease")]
+    before = len(rig[1].writes)
+    assert rig[2].plan_proposal(*args) is None
+    await rig[2].propose_plan(*args, plan())
+    assert rig[2].plan_proposal(*args)["sl"] == "11"
+    assert len(rig[1].writes) == before
+    await signal(rig, "SL 放在10.50", message=2, reply=1)
+    before = len(rig[1].writes)
+    with pytest.raises(Review, match="stale"):
+        rig[2].plan_proposal(*args)
+    with pytest.raises(Review, match="stale"):
+        await rig[2].apply_plan(*args, plan())
+    assert len(rig[1].writes) == before
+
+
+async def test_expired_or_disabled_plan_cannot_stage_or_execute(rig):
+    await signal(rig)
+    job = await rig[2].claim_plan()
+    args = [job[k] for k in ("trade_id", "version", "lease")]
+    trade = rig[0].trade(job["trade_id"])
+    trade["plan_lease"] = time.time() - 1
+    rig[0].save_trade(trade)
+    before = len(rig[1].writes)
+    with pytest.raises(Review, match="stale"):
+        await rig[2].propose_plan(*args, plan())
+    with pytest.raises(Review, match="stale"):
+        await rig[2].apply_plan(*args, plan())
+    job = await rig[2].claim_plan()
+    rig[2].enabled = False
+    with pytest.raises(Review, match="disabled"):
+        await rig[2].propose_plan(job["trade_id"], job["version"], job["lease"], plan())
+    assert len(rig[1].writes) == before
+
+
 async def test_pause_does_not_block_close(rig):
     await signal(rig)
     rig[2].pause("operator")

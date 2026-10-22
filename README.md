@@ -72,8 +72,12 @@ access another channel or retrieve secrets. Images have an explicit 8 MiB transp
 limit; message text is never silently truncated. Analysis batches are paginated at
 50 events/four media items; unread backlog blocks new entries, not order reconciliation.
 
-`exit_planner` fills TP/SL parameters asynchronously after a confirmed fill. It still
-mounts no MCP servers/tools; only a validated plan reaches the execution service.
+`exit_planner` fills TP/SL parameters asynchronously after a confirmed fill. Its
+only tool, `submit_exit_plan`, stages typed parameters for the assigned trade,
+version and lease. It has no order, account, history or arbitrary network tools.
+Free-text JSON is not parsed as a plan. The same direction/tick/lease checks run
+before staging and again before execution; invalid tool arguments can be corrected
+by the model without sending exchange orders.
 The admin's Telegram chat is bound to TelegramAgent on startup, and both continuous
 Routines are bootstrapped through the official Routine API. Chat history and source
 channel history are distinct; no ability to query history should be assumed outside

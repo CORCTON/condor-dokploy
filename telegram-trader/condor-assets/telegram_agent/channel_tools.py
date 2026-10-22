@@ -1,4 +1,4 @@
-"""Channel evidence tools and a lease-bound, non-executing decision proposal."""
+"""Lease-bound evidence/decision tools, or an isolated exit-plan proposal tool."""
 
 import asyncio
 import base64
@@ -120,6 +120,14 @@ EVIDENCE_TOOLS = {
 
 @mcp.list_tools()
 async def list_tools():
+    if os.getenv("EXIT_PLAN_JOB"):
+        return [
+            types.Tool(
+                name="submit_exit_plan",
+                description="Submit SL, TP1, TP2 and the TP1 fraction for the assigned filled trade only. This stages a validated proposal, never sends an exchange order. Correct tool-validation errors and resubmit, then finish. Do not claim orders exist.",
+                inputSchema=json.loads(os.environ["EXIT_PLAN_SCHEMA"]),
+            )
+        ]
     tools = [
         types.Tool(
             name=name,
@@ -146,6 +154,13 @@ async def list_tools():
 
 @mcp.call_tool()
 async def call_tool(name, arguments):
+    if os.getenv("EXIT_PLAN_JOB"):
+        if name != "submit_exit_plan":
+            raise ValueError("only the assigned exit-plan tool is available")
+        return await read(
+            "/plans/proposals",
+            body={**json.loads(os.environ["EXIT_PLAN_JOB"]), "plan": arguments},
+        )
     if name == "submit_signal_decisions" and os.getenv("SIGNAL_LEASE"):
         return await read(
             "/signals/proposals", body={"lease": os.environ["SIGNAL_LEASE"], "result": arguments}

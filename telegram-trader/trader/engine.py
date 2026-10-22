@@ -522,25 +522,45 @@ class Engine:
         # Before a plan exists, record TP prices but leave reduction fractions to
         # the planner; never invent a fraction just to satisfy an incomplete signal.
 
+    def plan_trade(self, trade_id, version, lease):
+        trade = self.store.trade(trade_id)
+        if (
+            not self.enabled
+            or not trade
+            or trade["status"] != "working"
+            or trade["version"] != version
+            or trade.get("plan_token") != lease
+            or trade.get("plan_lease", 0) <= time.time()
+            or not trade["plan_needed"]
+        ):
+            raise Review("stale, disabled or already applied AI plan")
+        if trade.get("close_requested"):
+            raise Review("trade is closing")
+        return trade
+
+    def validate_plan(self, trade, plan):
+        values = json.loads(plan.model_dump_json()) | trade.get("channel_levels", {})
+        plan = Plan.model_validate(values)
+        plan.validate_side(trade["side"], D(trade["entry_price"]))
+        for price in (plan.sl, plan.tp1, plan.tp2):
+            if price % D(trade["tick"]) != 0:
+                raise Review("AI price not on exchange tick")
+        return plan
+
+    async def propose_plan(self, trade_id, version, lease, plan):
+        async with self.lock:
+            trade = self.plan_trade(trade_id, version, lease)
+            plan = self.validate_plan(trade, plan)
+            trade["plan_proposal"] = json.loads(plan.model_dump_json())
+            self.store.save_trade(trade)
+
+    def plan_proposal(self, trade_id, version, lease):
+        return self.plan_trade(trade_id, version, lease).get("plan_proposal")
+
     async def apply_plan(self, trade_id, version, lease, plan):
         async with self.lock:
-            trade = self.store.trade(trade_id)
-            if (
-                not trade
-                or trade["status"] != "working"
-                or trade["version"] != version
-                or trade.get("plan_token") != lease
-                or not trade["plan_needed"]
-            ):
-                raise Review("stale or already applied AI plan")
-            if trade.get("close_requested"):
-                raise Review("trade is closing")
-            values = json.loads(plan.model_dump_json()) | trade.get("channel_levels", {})
-            plan = Plan.model_validate(values)
-            plan.validate_side(trade["side"], D(trade["entry_price"]))
-            for price in (plan.sl, plan.tp1, plan.tp2):
-                if price % D(trade["tick"]) != 0:
-                    raise Review("AI price not on exchange tick")
+            trade = self.plan_trade(trade_id, version, lease)
+            plan = self.validate_plan(trade, plan)
             position = await self.owned_position(trade)
             quantity = int(abs(D(position["size"])))
             if quantity <= 0:
@@ -797,7 +817,7 @@ class Engine:
                     and not trade.get("close_requested")
                 ):
                     token = uuid.uuid4().hex
-                    trade.update(plan_token=token, plan_lease=time.time() + 120)
+                    trade.update(plan_token=token, plan_lease=time.time() + 120, plan_proposal=None)
                     self.store.save_trade(trade)
                     job = {
                         "trade_id": trade["id"],
@@ -810,6 +830,7 @@ class Engine:
                         "filled_contracts": trade["filled"],
                         "channel_text_untrusted": trade["source_text"],
                         "channel_levels": trade.get("channel_levels", {}),
+                        "output_schema": Plan.model_json_schema(),
                     }
                     break
             else:

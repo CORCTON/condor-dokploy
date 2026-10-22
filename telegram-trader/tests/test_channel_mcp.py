@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestServer
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from test_channel import TelegramFixture
+from test_trader import Exchange, plan, signal
 
 from trader.app import make_app
 from trader.channel import ChannelReader
@@ -101,5 +102,54 @@ async def test_typed_proposal_tool_rejects_bad_fields_without_exchange_writes(mo
                     "submit_signal_decisions", {"decisions": [decision]}
                 )
                 assert stale.isError
+    finally:
+        store.close()
+
+
+async def test_exit_plan_tool_only_stages_valid_fresh_arguments(monkeypatch):
+    monkeypatch.setenv("TRADER_TOKEN", "mcp-fixture-only")
+    store, exchange = Store(":memory:"), Exchange()
+    engine = Engine(store, exchange, enabled=True)
+    engine.listener_ready = True
+    store.set("paused", False)
+    await signal((store, exchange, engine))
+    job = await engine.claim_plan()
+    args = [job[key] for key in ("trade_id", "version", "lease")]
+    writes = len(exchange.writes)
+    try:
+        async with TestServer(make_app(engine)) as http:
+            params = StdioServerParameters(
+                command=sys.executable,
+                args=[
+                    str(Path(__file__).parents[1] / "condor-assets/telegram_agent/channel_tools.py")
+                ],
+                env={
+                    **os.environ,
+                    "TELEGRAM_TRADER_URL": str(http.make_url("/")).rstrip("/"),
+                    "EXIT_PLAN_JOB": json.dumps(
+                        {k: job[k] for k in ("trade_id", "version", "lease")}
+                    ),
+                    "EXIT_PLAN_SCHEMA": json.dumps(job["output_schema"]),
+                },
+            )
+            async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+                await session.initialize()
+                assert {tool.name for tool in (await session.list_tools()).tools} == {
+                    "submit_exit_plan"
+                }
+                values = plan().model_dump(mode="json")
+                bad = await session.call_tool("submit_exit_plan", {**values, " sl": "11"})
+                assert bad.isError and engine.plan_proposal(*args) is None
+                bad = await session.call_tool("submit_exit_plan", {**values, "sl": "9"})
+                assert bad.isError and engine.plan_proposal(*args) is None
+                bad = await session.call_tool("submit_exit_plan", {**values, "sl": "11.001"})
+                assert bad.isError and engine.plan_proposal(*args) is None
+                good = await session.call_tool("submit_exit_plan", values)
+                assert not good.isError and engine.plan_proposal(*args) == values
+                assert len(exchange.writes) == writes
+                await signal((store, exchange, engine), "SL 放在10.50", message=2, reply=1)
+                writes = len(exchange.writes)
+                stale = await session.call_tool("submit_exit_plan", values)
+                assert stale.isError and len(exchange.writes) == writes
     finally:
         store.close()

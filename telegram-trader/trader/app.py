@@ -128,6 +128,22 @@ def make_app(engine, channel=None):
                 engine.store.save_trade(trade)
         return web.json_response({"recorded": True})
 
+    async def plan_propose(request):
+        body = await request.json()
+        await engine.propose_plan(
+            body["trade_id"], body["version"], body["lease"], Plan.model_validate(body["plan"])
+        )
+        return web.json_response({"accepted": True, "executed": False})
+
+    async def plan_proposal(request):
+        return web.json_response(
+            engine.plan_proposal(
+                request.match_info["trade_id"],
+                int(request.query["version"]),
+                request.query["lease"],
+            )
+        )
+
     async def signal_jobs(request):
         engine.store.set("interpreter_seen", time.time())
         return web.json_response(await inbox.claim())
@@ -180,6 +196,8 @@ def make_app(engine, channel=None):
     app.router.add_post("/pause", pause)
     app.router.add_post("/jobs/claim", jobs)
     app.router.add_post("/plans", plan)
+    app.router.add_post("/plans/proposals", plan_propose)
+    app.router.add_get("/plans/{trade_id}/proposal", plan_proposal)
     app.router.add_post("/jobs/fail", plan_failed)
     app.router.add_post("/signals/claim", signal_jobs)
     app.router.add_get("/signals/{lease}/fresh", signal_fresh)

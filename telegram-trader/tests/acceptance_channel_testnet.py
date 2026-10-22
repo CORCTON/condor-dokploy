@@ -158,9 +158,12 @@ async def cycle(gate, session, name, interpreter, planner):
             job = await engine.claim_plan()
             assert job is not None
             started = time.monotonic()
+            writes_before_plan = len(gate.writes)
             raw = await asyncio.wait_for(
                 planner.generate_plan(job, int(os.environ["ADMIN_USER_ID"])), 90
             )
+            assert ["submit_exit_plan"] in evidence.calls
+            assert len(gate.writes) == writes_before_plan, "Proposal tool must not place orders"
             await engine.apply_plan(
                 job["trade_id"], job["version"], job["lease"], Plan.model_validate(raw)
             )
@@ -192,6 +195,14 @@ async def cycle(gate, session, name, interpreter, planner):
         report["result"] = "PASS"
     except Exception as exc:  # noqa: BLE001 -- ensure TestNet cleanup on any failure
         report.update(result="FAIL", error_type=type(exc).__name__, error=str(exc))
+        errors, pending = [], [exc]
+        while pending:
+            error = pending.pop()
+            if isinstance(error, BaseExceptionGroup):
+                pending.extend(error.exceptions)
+            else:
+                errors.append({"type": type(error).__name__, "detail": str(error)})
+        report["causes"] = errors
     finally:
         for trade in engine.active():
             if trade.get("entry_id"):
@@ -221,6 +232,9 @@ async def cycle(gate, session, name, interpreter, planner):
 
 
 async def main():
+    from copy import deepcopy
+
+    from condor.agents.agent import AgentStore
     from condor.runtime.llm_client import build_llm_client
 
     credentials = json.load(sys.stdin)
@@ -228,13 +242,24 @@ async def main():
     os.environ["TRADER_TOKEN"] = "isolated-testnet-fixture-token"
     interpreter, planner = routine("signal_interpreter"), routine("exit_planner")
     model = os.getenv("ACCEPTANCE_MODEL", "custom:devin/gemini-4-argon")
+    get_agent = AgentStore.get
+
+    def candidate_agent(store, slug):
+        agent = deepcopy(get_agent(store, slug))
+        if slug == "telegram_agent" and agent is not None:
+            instructions = Path(planner.__file__).parents[1] / "AGENT.md"
+            agent.instructions = instructions.read_text().split("---", 2)[2].strip()
+        return agent
 
     def evaluation_client(agent_key, **kwargs):
         assert agent_key.startswith("custom:devin/gemini-4-argon")
         return build_llm_client(model, **kwargs)
 
     print(json.dumps({"acceptance_model": model}), flush=True)
-    with patch("condor.runtime.llm_client.build_llm_client", side_effect=evaluation_client):
+    with (
+        patch("condor.runtime.llm_client.build_llm_client", side_effect=evaluation_client),
+        patch.object(AgentStore, "get", candidate_agent),
+    ):
         async with aiohttp.ClientSession() as session:
             gate = TestnetGate(session, credentials)
             for name in ("long_market", "short_market", "cancel_unfilled_limit"):

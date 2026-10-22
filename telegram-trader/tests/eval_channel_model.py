@@ -14,7 +14,7 @@ from aiohttp import web
 from pydantic import ValidationError
 
 from trader.engine import Engine, Review
-from trader.models import Decisions
+from trader.models import Decisions, Plan
 from trader.signals import SignalInbox
 from trader.store import Store
 
@@ -79,6 +79,23 @@ class Evidence:
         async def proposal(request):
             return web.json_response(inbox.proposal(request.match_info["lease"]))
 
+        async def plan_propose(request):
+            body = await request.json()
+            await engine.propose_plan(
+                body["trade_id"], body["version"], body["lease"], Plan.model_validate(body["plan"])
+            )
+            self.calls.append(["submit_exit_plan"])
+            return web.json_response({"accepted": True, "executed": False})
+
+        async def plan_proposal(request):
+            return web.json_response(
+                engine.plan_proposal(
+                    request.match_info["trade_id"],
+                    int(request.query["version"]),
+                    request.query["lease"],
+                )
+            )
+
         app = web.Application(middlewares=[validation])
         app.router.add_get("/channel/history", history)
         app.router.add_get("/channel/messages/{message_id}", read)
@@ -86,6 +103,8 @@ class Evidence:
         app.router.add_get("/status", state)
         app.router.add_post("/signals/proposals", propose)
         app.router.add_get("/signals/{lease}/proposal", proposal)
+        app.router.add_post("/plans/proposals", plan_propose)
+        app.router.add_get("/plans/{trade_id}/proposal", plan_proposal)
         return app
 
 

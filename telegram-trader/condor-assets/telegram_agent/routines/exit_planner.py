@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import os
+import sys
+from pathlib import Path
 
 import aiohttp
 from pydantic import BaseModel
@@ -17,7 +19,7 @@ class Config(BaseModel):
 
 
 async def generate_plan(job, owner):
-    from condor.acp.client import PromptDone, TextChunk
+    from condor.acp.client import PromptDone
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
     from condor.agents.agent import AgentStore
     from condor.runtime import context as runtime_context
@@ -26,24 +28,57 @@ async def generate_plan(job, owner):
     agent = AgentStore().get("telegram_agent")
     if agent is None or not is_pydantic_ai_model(agent.agent_key):
         raise ValueError("Exit planner requires a configured API model, not a shell/ACP agent")
-    # Use Condor's provider resolution and Agent context, but attach NO MCP
-    # servers. Untrusted channel text cannot induce a model-side tool action.
-    client = build_llm_client(agent.agent_key, mcp_servers=[], user_id=owner)
-    task = "EXIT_PLAN_JOB\nReturn only the prescribed JSON exit plan.\n" + json.dumps(job)
+    # Only a lease-bound proposal tool is mounted, never an exchange/order tool.
+    client = build_llm_client(
+        agent.agent_key,
+        user_id=owner,
+        mcp_servers=[
+            {
+                "name": "telegram_exit_plan",
+                "command": sys.executable,
+                "args": [str(Path(__file__).resolve().parents[1] / "channel_tools.py")],
+                "env": [
+                    {
+                        "name": "EXIT_PLAN_JOB",
+                        "value": json.dumps(
+                            {key: job[key] for key in ("trade_id", "version", "lease")}
+                        ),
+                    },
+                    {"name": "EXIT_PLAN_SCHEMA", "value": json.dumps(job["output_schema"])},
+                ],
+            }
+        ],
+    )
+    task = (
+        "EXIT_PLAN_JOB\nCall submit_exit_plan with the complete plan. Free-text is not a plan. "
+        "Correct validation errors using the tool, then finish after acceptance.\n"
+        + json.dumps(job)
+    )
     prompt = runtime_context.build_agent_context(agent, owner, task, "")
-    chunks, reason = [], ""
+    reason = ""
     try:
         await client.start()
         async for event in client.prompt_stream(prompt):
-            if isinstance(event, TextChunk):
-                chunks.append(event.text)
-            elif isinstance(event, PromptDone):
+            if isinstance(event, PromptDone):
                 reason = event.stop_reason
     finally:
         await client.stop()
     if reason != "end_turn":
         raise RuntimeError("Exit planner did not complete normally")
-    return json.loads("".join(chunks))
+    async with (
+        aiohttp.ClientSession() as session,
+        session.get(
+            os.environ["TELEGRAM_TRADER_URL"].rstrip("/") + f"/plans/{job['trade_id']}/proposal",
+            params={"version": job["version"], "lease": job["lease"]},
+            headers={"Authorization": "Bearer " + os.environ["TRADER_TOKEN"]},
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as response,
+    ):
+        response.raise_for_status()
+        plan = await response.json()
+    if plan is None:
+        raise ValueError("Model ended without a validated exit-plan tool call")
+    return plan
 
 
 async def run(config: Config, context):
