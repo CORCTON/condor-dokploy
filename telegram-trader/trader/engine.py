@@ -28,6 +28,18 @@ def isolated_position(position):
     )
 
 
+def validate_account(account):
+    if (
+        account.get("currency") != "USDT"
+        or account.get("in_dual_mode") is not False
+        or account.get("margin_mode") != 0
+        or account.get("position_mode") != "single"
+    ):
+        raise Review(
+            "requires classic USDT futures, one-way mode; account mode will not be changed"
+        )
+
+
 def size_order(equity, available, price, contract):
     equity, available, price = D(equity), D(available), D(price)
     multiplier = D(contract["quanto_multiplier"])
@@ -52,13 +64,47 @@ class Engine:
         self.store, self.gate, self.enabled = store, gate, enabled
         self.lock = asyncio.Lock()
         self.listener_ready = False
+        self.pause_revision = 0
 
     def paused(self):
         return self.store.get("paused", True) or bool(self.store.unknowns())
 
     def pause(self, reason):
+        self.pause_revision += 1
         self.store.set("paused", True)
         self.store.set("pause_reason", reason)
+
+    async def resume(self):
+        """Operator-only control: read-only checks, no order or leverage writes."""
+        async with self.lock:
+            revision = self.pause_revision
+
+            def check():
+                if not self.enabled or not self.gate.ready:
+                    raise Review("执行配置或凭证未就绪，未开启跟单；请检查服务配置。")
+                if not self.listener_ready:
+                    raise Review("频道监听未连接，未开启跟单；请等待监听恢复后重试。")
+                if self.store.unknowns():
+                    raise Review("存在结果未确认的订单，未开启跟单；请先核对订单结果。")
+                if any(t.get("last_error") for t in self.active()):
+                    raise Review("已有仓位需要人工核查，未开启跟单；请先查看执行状态。")
+                if any(
+                    time.time() - self.store.get(name, 0) > 180
+                    for name in ("interpreter_seen", "planner_seen")
+                ):
+                    raise Review("信号分析或止盈止损规划未就绪，未开启跟单；请检查 Routine。")
+                if revision != self.pause_revision:
+                    raise Review("检查期间收到暂停指令，保持暂停；如需开启，请重新发送开始。")
+
+            check()
+            validate_account(await self.gate.get("/accounts"))
+            check()
+            if self.paused():
+                # Only messages received AND published after this activation may
+                # open positions. A second start is idempotent, not a new cutoff.
+                self.store.set("entries_started_after", time.time())
+                self.store.set("pause_reason", "")
+                self.store.set("paused", False)
 
     def active(self):
         return [t for t in self.store.trades() if t["status"] not in {"closed", "rejected"}]
@@ -66,6 +112,8 @@ class Engine:
     async def write(self, trade, key, method, path, body=None, params=None):
         if not self.enabled:
             raise Review("deployment disabled; exchange writes forbidden")
+        if key in {trade["id"] + ":entry", trade["id"] + ":leverage"} and self.paused():
+            raise Review("new entries paused before submission")
         # Gate text is a correlation key, NOT a server-side exactly-once guarantee.
         previous = self.store.operation(key)
         if previous:
@@ -115,6 +163,9 @@ class Engine:
             if self.store.watermark(event["channel"]) != watermark:
                 raise Review("new channel message arrived; stale decision not executed")
             if signal.action == "open":
+                started_after = self.store.get("entries_started_after", 0)
+                if min(event["received"], payload["source_time"]) <= started_after:
+                    raise Review("entry predates operator activation; no catch-up entry")
                 if self.store.queued():
                     raise Review("unread channel backlog; no new entry")
                 if time.time() - payload["source_time"] > 60:
@@ -172,15 +223,7 @@ class Engine:
             self.gate.get(f"/contracts/{symbol}"),
             self.gate.market(symbol),
         )
-        if (
-            account.get("currency") != "USDT"
-            or account.get("in_dual_mode") is not False
-            or account.get("margin_mode") != 0
-            or account.get("position_mode") != "single"
-        ):
-            raise Review(
-                "requires classic USDT futures, one-way mode; account mode will not be changed"
-            )
+        validate_account(account)
         if D(position["size"]) != 0:
             raise Review("unmanaged position exists")
         if orders:
@@ -798,6 +841,8 @@ class Engine:
                                 raise Review("native stop no longer active; manual review required")
                     if trade.get("retired_stops") and trade["exits"].get("sl"):
                         await self.cancel_retired_stops(trade)
+                    if trade.pop("last_error", None):
+                        self.store.save_trade(trade)
                 except Exception as exc:  # noqa: BLE001 -- isolate each position and pause on any failure
                     label = str(exc) if isinstance(exc, (Review, GateError)) else type(exc).__name__
                     if trade.get("last_error") != label:

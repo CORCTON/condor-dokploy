@@ -119,8 +119,8 @@ Stopping the Routine terminates that worker and its MCP process group.
   restart are still interpreted but are not auto-opened. This freshness guard is separate from position
   holding time. Offline missed instructions require review; no history catch-up
   opens. The dedicated account must not be concurrently traded by other bots.
-- Private API port is internal only, token-authenticated, with no entry or live
-  activation endpoint. A decision submission requires a current durable analysis
+- Private API port is internal only and token-authenticated. There is no free-form
+  order endpoint. A decision submission requires a current durable analysis
   lease and complete event coverage; it is not a free-form order endpoint.
   Exchange keys are never exposed through model tools or status responses.
   Only Condor polls the existing Telegram bot; the service only sends notices.
@@ -128,11 +128,35 @@ Stopping the Routine terminates that worker and its MCP process group.
 ## Configuration (all live trading disabled by default)
 
 `TRADER_ENABLED=false`, `TRADER_LLM_READY=false`, `GATE_ENVIRONMENT=testnet` are
-the deployment defaults. Readiness is separate from process health. Initial
-activation requires deployment configuration and clearing the persisted pause
-after testnet acceptance; restart preserves operator pause state.
+the deployment defaults. Readiness is separate from process health. Once an
+operator deployment is provisioned with the intended environment/credentials and
+`TRADER_ENABLED=true`, the administrator controls entries through the one-shot
+`telegram_agent/trader_status` Routine. Deployment readiness is not activation:
+the initial persisted pause remains set until an explicit operator start.
+Restart preserves operator pause state.
 Telegram collection and interpretation can run with exchange execution disabled;
 they do not require exchange keys. New decisions remain non-executable while disabled.
+
+### Telegram start / pause
+
+Tell the bound TelegramAgent **开始跟单 / 恢复跟单**, **暂停跟单 / 关闭跟单**, or
+**查看状态**. It calls the existing `manage_routines` tool with `action=run`,
+`name=telegram_agent/trader_status` and `config.action=start|pause|status`.
+Only the configured administrator's official Routine context may use this control.
+The channel interpreter and exit planner do not expose the control tool.
+Do not stop the continuous Routines to implement a pause.
+
+Start performs read-only checks for credentials/account mode, listener readiness,
+Routine heartbeats and unresolved operations/trade errors. It does not place an
+order or change account mode/leverage. A start never overrides a concurrent pause.
+Messages published or received before activation cannot open a position; repeated
+start is idempotent. The response's `new_entries_enabled` is the authoritative flag.
+
+Pause blocks subsequent new entry/leverage submissions and remains set across
+restarts. Existing positions continue to receive exit management. Already submitted
+market/limit orders are **not cancelled** and can still fill; pause is not flatten-all
+or a guarantee that an in-flight HTTP request was not accepted by the exchange.
+Replies must report returned state or an explicit failure, never just promise success.
 
 Required from the operator:
 

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import aiohttp
 from aiohttp import web
-from telethon import TelegramClient, events, utils
 
 from .channel import ChannelReader, describe_message
 from .credentials import load_credentials
@@ -60,7 +59,9 @@ def make_app(engine, channel=None, credentials=None):
                 "alive": True,
                 "enabled": engine.enabled,
                 "ready": (
-                    engine.enabled and engine.listener_ready and not engine.paused()
+                    engine.enabled
+                    and engine.listener_ready
+                    and not engine.paused()
                     and not missing_config(credentials)
                 ),
                 "missing": missing_config(credentials),
@@ -72,6 +73,14 @@ def make_app(engine, channel=None, credentials=None):
             {
                 "enabled": engine.enabled,
                 "paused": engine.paused(),
+                "new_entries_enabled": (
+                    engine.enabled
+                    and not engine.paused()
+                    and engine.listener_ready
+                    and not missing_config(credentials)
+                ),
+                "entries_started_after": engine.store.get("entries_started_after"),
+                "pause_scope": "停止提交新开仓；已有仓位继续管理；已提交的订单不自动撤销，仍可能成交。",
                 "pause_reason": engine.store.get("pause_reason", "activation required"),
                 "listener_ready": engine.listener_ready,
                 "missing": missing_config(credentials),
@@ -93,6 +102,7 @@ def make_app(engine, channel=None, credentials=None):
                             "filled",
                             "position_size",
                             "entry_price",
+                            "entry_terminal",
                             "margin_budget",
                             "exits",
                             "plan_needed",
@@ -106,7 +116,16 @@ def make_app(engine, channel=None, credentials=None):
 
     async def pause(request):
         engine.pause("operator requested pause")
-        return web.json_response({"paused": True})
+        return await status(request)
+
+    async def start(request):
+        if missing_config(credentials):
+            raise Review("启动配置未就绪，未开启跟单；请查询状态中的 missing。")
+        try:
+            await engine.resume()
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise Review("交易所连接检查未完成，未确认开启；请查询状态后重试。") from exc
+        return await status(request)
 
     async def jobs(request):
         engine.store.set("planner_seen", time.time())
@@ -199,6 +218,7 @@ def make_app(engine, channel=None, credentials=None):
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
     app.router.add_post("/pause", pause)
+    app.router.add_post("/start", start)
     app.router.add_post("/jobs/claim", jobs)
     app.router.add_post("/plans", plan)
     app.router.add_post("/plans/proposals", plan_propose)
@@ -213,12 +233,14 @@ def make_app(engine, channel=None, credentials=None):
     app.router.add_get("/channel/history", history)
     app.router.add_get("/channel/messages/{message_id}", message)
     app.router.add_get("/channel/messages/{message_id}/image", image)
-    # No free-form entry/activation endpoint. Decisions require a current durable
+    # No free-form order endpoint. Decisions require a current durable
     # inbox lease; model tools expose evidence and staging, never execution.
     return app
 
 
 async def listen(engine, channel):
+    from telethon import TelegramClient, events, utils
+
     while True:
         if missing_config():
             await asyncio.sleep(10)
