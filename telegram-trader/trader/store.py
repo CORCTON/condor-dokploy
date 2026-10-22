@@ -23,6 +23,9 @@ class Store:
                 body TEXT, status TEXT, result TEXT, created REAL);
             CREATE TABLE IF NOT EXISTS notices (
                 id INTEGER PRIMARY KEY, text TEXT NOT NULL, sent INTEGER DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS analyses (
+                id TEXT PRIMARY KEY, channel INTEGER, watermark INTEGER,
+                event_ids TEXT, trade_state TEXT, status TEXT, expires REAL, result TEXT);
         """)
 
     def get(self, key, default=None):
@@ -33,8 +36,10 @@ class Store:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, json.dumps(value)))
 
-    def event(self, channel, message, text, reply, source_time, live, edited=False):
-        revision = hashlib.sha256(text.encode()).hexdigest()[:16]
+    def event(self, channel, message, text, reply, source_time, live, edited=False, media=None):
+        revision = hashlib.sha256(
+            json.dumps([text, reply, media], sort_keys=True).encode()
+        ).hexdigest()[:16]
         key = f"{channel}:{message}:{revision}"
         payload = {
             "text": text,
@@ -42,6 +47,7 @@ class Store:
             "source_time": source_time,
             "live": live,
             "edited": edited,
+            "media": media,
         }
         with self.db:
             cursor = self.db.execute(
@@ -58,8 +64,46 @@ class Store:
 
     def queued(self):
         return self.db.execute(
-            "SELECT * FROM events WHERE status='queued' ORDER BY received"
+            "SELECT * FROM events WHERE status='queued' ORDER BY received,rowid"
         ).fetchall()
+
+    def watermark(self, channel):
+        return self.db.execute(
+            "SELECT COALESCE(MAX(rowid),0) FROM events WHERE channel=?", (channel,)
+        ).fetchone()[0]
+
+    def analysis(self, key):
+        row = self.db.execute("SELECT * FROM analyses WHERE id=?", (key,)).fetchone()
+        return dict(row) if row else None
+
+    def release_analysis(self, key, status="stale"):
+        job = self.analysis(key)
+        if not job or job["status"] not in {"analyzing", "applying"}:
+            return
+        with self.db:
+            self.db.execute("UPDATE analyses SET status=? WHERE id=?", (status, key))
+            for event_id in json.loads(job["event_ids"]):
+                self.db.execute(
+                    "UPDATE events SET status='queued' WHERE id=? AND status='analyzing'",
+                    (event_id,),
+                )
+
+    def recover_analysis(self):
+        # A restart never grants permission to replay an old entry. Still let the
+        # model interpret every unprocessed message, now marked context-only.
+        with self.db:
+            for row in self.db.execute(
+                "SELECT id,payload FROM events WHERE status IN ('queued','analyzing','processing')"
+            ).fetchall():
+                payload = json.loads(row["payload"])
+                payload["live"] = False
+                self.db.execute(
+                    "UPDATE events SET status='queued',payload=? WHERE id=?",
+                    (json.dumps(payload), row["id"]),
+                )
+            self.db.execute(
+                "UPDATE analyses SET status='abandoned' WHERE status IN ('analyzing','applying')"
+            )
 
     def save_trade(self, trade):
         with self.db:

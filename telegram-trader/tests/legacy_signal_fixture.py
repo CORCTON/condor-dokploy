@@ -1,9 +1,13 @@
-"""Conservative text grammar. Never interpret screenshots or forecast language as orders."""
+"""Legacy canned decisions for executor regression fixtures ONLY.
+
+Not imported by the service or model worker. These fixtures do not measure Gemini
+language understanding; real-model interpretation requires a separate evaluation.
+"""
 
 import re
 import unicodedata
 
-from .models import Signal
+from trader.models import Signal
 
 _TRANSLATE = str.maketrans(
     "當價進場單倉補損獲勢壓鍵後擇這筆於", "当价进场单仓补损获势压键后择这笔于"

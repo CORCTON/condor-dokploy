@@ -10,7 +10,11 @@ log = logging.getLogger(__name__)
 
 
 def bind():
-    from condor.preferences import get_chat_binding, load_user_data_for, set_chat_binding
+    from condor.preferences import (
+        get_chat_binding,
+        load_user_data_for,
+        set_chat_binding,
+    )
 
     data = load_user_data_for(int(os.environ["ADMIN_USER_ID"]))
     if get_chat_binding(data).get("agent_slug") != "telegram_agent":
@@ -31,29 +35,33 @@ async def bootstrap():
                 }
                 base = f"http://127.0.0.1:{WEB_PORT}/api/v1/routines"
                 async with session.get(
-                    base + "/instances", headers=headers, timeout=aiohttp.ClientTimeout(total=5)
+                    base + "/instances",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=5),
                 ) as response:
                     response.raise_for_status()
                     instances = await response.json()
-                if any(
-                    item.get("routine_name") == "telegram_agent/exit_planner"
-                    and item.get("status") == "running"
-                    for item in instances
-                ):
-                    return
-                async with session.post(
-                    base + "/start",
-                    headers=headers,
-                    json={
-                        "routine_name": "telegram_agent/exit_planner",
-                        "server_name": "main",
-                        "config": {},
-                        "attribute_to": "telegram_agent",
-                    },
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as response:
-                    response.raise_for_status()
-                log.warning("TelegramAgent exit planner started via official Routine API")
+                for routine in ("signal_interpreter", "exit_planner"):
+                    name = "telegram_agent/" + routine
+                    if any(
+                        item.get("routine_name") == name
+                        and item.get("status") == "running"
+                        for item in instances
+                    ):
+                        continue
+                    async with session.post(
+                        base + "/start",
+                        headers=headers,
+                        json={
+                            "routine_name": name,
+                            "server_name": "main",
+                            "config": {},
+                            "attribute_to": "telegram_agent",
+                        },
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as response:
+                        response.raise_for_status()
+                    log.warning("%s started via official Routine API", name)
                 return
             except Exception as exc:  # noqa: BLE001 -- retry only local bootstrap, never exchange writes
                 log.warning("TelegramAgent bootstrap waiting: %s", type(exc).__name__)

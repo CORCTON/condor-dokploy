@@ -18,7 +18,7 @@ from trader.store import Store
 
 @pytest.mark.parametrize("side,limit", [("long", False), ("short", False), ("short", True)])
 async def test_full_lifecycle_over_http(tmp_path, monkeypatch, side, limit):
-    """Parser -> signed HTTP -> fill -> plan API -> amendments -> TP -> restart -> close."""
+    """Scripted decision -> signed HTTP -> fill -> plan -> amendments -> TP -> restart -> close."""
     exchange = Exchange()
     secret = "simulation-only-secret"
 
@@ -74,7 +74,7 @@ async def test_full_lifecycle_over_http(tmp_path, monkeypatch, side, limit):
                 entry["left"] = trade["lots"] - 4
                 exchange.position["size"] = sign * 4
                 await engine.poll()
-            assert not exchange.stops  # entry is deliberately not blocked on AI
+            assert not exchange.stops  # model-approved entry does not wait for an exit plan
             values = (
                 {"sl": "9", "tp1": "11", "tp2": "12"}
                 if side == "long"

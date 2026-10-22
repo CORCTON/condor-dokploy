@@ -4,12 +4,12 @@ import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from legacy_signal_fixture import parse
 
 from trader.app import make_app
 from trader.engine import Engine, Review, size_order
 from trader.gate import GateError
 from trader.models import Plan
-from trader.parser import parse
 from trader.store import Store
 
 CONTRACT = {
@@ -149,7 +149,13 @@ async def signal(
     key = store.event(-100123, message, text, reply, time.time(), live, edited)
     if key:
         event = store.db.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone()
-        await engine.process(event)
+        reference = store.reply_trade(event["channel"], reply)
+        decision = parse(text, reference["symbol"].removesuffix("_USDT") if reference else None)
+        if decision.action not in {"open", "ignore", "review"}:
+            matches = [t for t in engine.active() if t["symbol"] == decision.symbol + "_USDT"]
+            if len(matches) == 1:
+                decision.target_trade_id = matches[0]["id"]
+        await engine.process(event, decision)
     return store.trades()[0] if store.trades() else None
 
 
@@ -175,7 +181,7 @@ def plan():
         ("當前價格可以選擇全部止盈", "review", None),
     ],
 )
-def test_parser(text, action, symbol):
+def test_legacy_executor_fixture_labels(text, action, symbol):
     result = parse(text)
     assert (result.action, result.symbol) == (action, symbol)
 
@@ -193,7 +199,7 @@ def test_invalid_values(price):
         size_order("100", "100", price, CONTRACT)
 
 
-async def test_entry_immediate_without_ai_or_stop(rig):
+async def test_model_approved_entry_does_not_wait_for_exit_plan(rig):
     store, exchange, _ = rig
     trade = await signal(rig)
     assert trade["filled"] == 14
@@ -526,7 +532,10 @@ async def test_combined_addon_and_stop_only_changes_stop(rig):
 async def test_stale_queued_open_does_not_trade(rig):
     store, exchange, engine = rig
     key = store.event(-100123, 1, "#INJ 当前价格入场一笔空单", None, time.time() - 120, True)
-    await engine.process(store.db.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone())
+    await engine.process(
+        store.db.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone(),
+        parse("#INJ 当前价格入场一笔空单"),
+    )
     assert not exchange.writes
 
 

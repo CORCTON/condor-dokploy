@@ -10,9 +10,11 @@ import aiohttp
 from aiohttp import web
 from telethon import TelegramClient, events, utils
 
+from .channel import ChannelReader, describe_message
 from .engine import Engine, Review
 from .gate import Gate, GateError
-from .models import Plan
+from .models import Decisions, Plan
+from .signals import SignalInbox
 from .store import Store
 
 log = logging.getLogger("trader")
@@ -47,8 +49,9 @@ async def auth(request, handler):
         raise web.HTTPConflict(text=str(exc)) from exc
 
 
-def make_app(engine):
+def make_app(engine, channel=None):
     app = web.Application(middlewares=[auth], client_max_size=32 * 1024)
+    inbox = SignalInbox(engine)
 
     async def health(request):
         return web.json_response(
@@ -69,6 +72,10 @@ def make_app(engine):
                 "listener_ready": engine.listener_ready,
                 "missing": missing_config(),
                 "planner_seen": engine.store.get("planner_seen"),
+                "interpreter_seen": engine.store.get("interpreter_seen"),
+                "pending_messages": engine.store.db.execute(
+                    "SELECT COUNT(*) FROM events WHERE status IN ('queued','analyzing')"
+                ).fetchone()[0],
                 "unknown_writes": len(engine.store.unknowns()),
                 "trades": [
                     {
@@ -121,19 +128,76 @@ def make_app(engine):
                 engine.store.save_trade(trade)
         return web.json_response({"recorded": True})
 
+    async def signal_jobs(request):
+        engine.store.set("interpreter_seen", time.time())
+        return web.json_response(await inbox.claim())
+
+    async def signal_fresh(request):
+        return web.json_response({"fresh": inbox.fresh(request.match_info["lease"])})
+
+    async def signal_result(request):
+        body = await request.json()
+        await inbox.apply(body["lease"], Decisions.model_validate(body["result"]))
+        return web.json_response({"accepted": True})
+
+    async def signal_propose(request):
+        body = await request.json()
+        await inbox.propose(body["lease"], Decisions.model_validate(body["result"]))
+        return web.json_response({"accepted": True, "executed": False})
+
+    async def signal_proposal(request):
+        return web.json_response(inbox.proposal(request.match_info["lease"]))
+
+    async def signal_failed(request):
+        body = await request.json()
+        inbox.failed(body["lease"], str(body.get("error", "model unavailable"))[:100])
+        return web.json_response({"recorded": True})
+
+    async def history(request):
+        if channel is None:
+            raise web.HTTPServiceUnavailable(text="channel reader unavailable")
+        return web.json_response(
+            await channel.history(
+                before_message_id=int(request.query.get("before_message_id", 0)),
+                limit=int(request.query.get("limit", 30)),
+                query=request.query.get("query", ""),
+            )
+        )
+
+    async def message(request):
+        if channel is None:
+            raise web.HTTPServiceUnavailable(text="channel reader unavailable")
+        return web.json_response(await channel.read(int(request.match_info["message_id"])))
+
+    async def image(request):
+        if channel is None:
+            raise web.HTTPServiceUnavailable(text="channel reader unavailable")
+        data, mime = await channel.image(int(request.match_info["message_id"]))
+        return web.Response(body=data, content_type=mime, headers={"Cache-Control": "no-store"})
+
     app.router.add_get("/health", health)
     app.router.add_get("/status", status)
     app.router.add_post("/pause", pause)
     app.router.add_post("/jobs/claim", jobs)
     app.router.add_post("/plans", plan)
     app.router.add_post("/jobs/fail", plan_failed)
-    # Deliberately no HTTP endpoint that creates entries or activates live trading.
+    app.router.add_post("/signals/claim", signal_jobs)
+    app.router.add_get("/signals/{lease}/fresh", signal_fresh)
+    app.router.add_post("/signals/decisions", signal_result)
+    app.router.add_post("/signals/proposals", signal_propose)
+    app.router.add_get("/signals/{lease}/proposal", signal_proposal)
+    app.router.add_post("/signals/fail", signal_failed)
+    app.router.add_get("/channel/history", history)
+    app.router.add_get("/channel/messages/{message_id}", message)
+    app.router.add_get("/channel/messages/{message_id}/image", image)
+    # No free-form entry/activation endpoint. Decisions require a current durable
+    # inbox lease; model tools expose evidence and staging, never execution.
     return app
 
 
-async def listen(engine):
+async def listen(engine, channel):
     while True:
-        if missing_config():
+        if [key for key in missing_config() if key not in {"GATE_API_KEY", "GATE_API_SECRET"}]:
             await asyncio.sleep(10)
             continue
         channel_id = int(os.environ["TG_CHANNEL_ID"])
@@ -155,6 +219,7 @@ async def listen(engine):
             peer = await client.get_entity(os.getenv("TG_CHANNEL", "") or channel_id)
             if utils.get_peer_id(peer) != channel_id:
                 raise Review("Telegram channel ID does not match configured peer")
+            channel.client, channel.peer = client, peer
             live_since = time.time()
 
             async def incoming(event, live_since=live_since, channel_id=channel_id):
@@ -172,6 +237,7 @@ async def listen(engine):
                     source_time,
                     fresh and engine.listener_ready,
                     edited,
+                    media=describe_message(message)["media"],
                 )
 
             client.add_event_handler(incoming, events.NewMessage(chats=peer))
@@ -185,21 +251,9 @@ async def listen(engine):
             log.warning("Telegram listener: %s", type(exc).__name__)
         finally:
             engine.listener_ready = False
+            channel.client, channel.peer = None, None
             await client.disconnect()
         await asyncio.sleep(5)
-
-
-async def process_events(engine):
-    while True:
-        for row in engine.store.queued():
-            try:
-                await engine.process(row)
-            except Exception as exc:  # noqa: BLE001 -- persist review, never retry a trade
-                engine.pause("unexpected event processing failure")
-                engine.store.finish(row["id"], "review", type(exc).__name__)
-                engine.store.notice(f"Signal needs review: {row['message']} / {type(exc).__name__}")
-                log.error("Event processing: %s", type(exc).__name__)
-        await asyncio.sleep(0.05)
 
 
 async def reconcile(engine):
@@ -246,13 +300,7 @@ async def main():
     lock = (state / "process.lock").open("w")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     store = Store(state / "trader.sqlite3")
-    # Queued opens are not replayed after a process crash. Order intents are
-    # reconciled separately against the exchange, never reconstructed as new orders.
-    with store.db:
-        store.db.execute(
-            "UPDATE events SET status='review', detail='process restarted before completion' "
-            "WHERE status IN ('queued','processing')"
-        )
+    store.recover_analysis()
     async with aiohttp.ClientSession() as session:
         gate = Gate(
             session,
@@ -267,7 +315,8 @@ async def main():
             engine.pause("initial activation required")
         if engine.active() and os.getenv("GATE_API_KEY"):
             await engine.poll()
-        runner = web.AppRunner(make_app(engine))
+        channel = ChannelReader()
+        runner = web.AppRunner(make_app(engine, channel))
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", 8080).start()
         log.info(
@@ -275,8 +324,7 @@ async def main():
         )
         try:
             await asyncio.gather(
-                listen(engine),
-                process_events(engine),
+                listen(engine, channel),
                 reconcile(engine),
                 notifications(engine, session),
             )

@@ -8,7 +8,6 @@ from decimal import ROUND_DOWN, Decimal
 from .gate import GateError
 from .models import Plan
 from .models import decimal as D
-from .parser import parse
 
 LEVERAGE = 7
 
@@ -95,64 +94,68 @@ class Engine:
         self.store.result(key, result)
         return result
 
-    async def process(self, event):
+    async def process(self, event, signal):
+        """Execute a validated model decision; never infer intent from text here."""
         async with self.lock:
-            payload = json.loads(event["payload"])
-            reference = self.store.reply_trade(event["channel"], payload["reply"])
-            replied = [reference] if reference else []
-            signal = parse(
-                payload["text"], replied[0]["symbol"].removesuffix("_USDT") if replied else None
-            )
-            self.store.finish(event["id"], "processing")
-            try:
-                if signal.action in {"ignore", "review"}:
-                    if signal.action == "review":
-                        self.store.notice(
-                            f"Signal needs review: {event['message']} / {signal.reason}"
-                        )
-                    self.store.finish(event["id"], signal.action, signal.reason)
-                    return
-                if not self.enabled:
-                    raise Review("deployment disabled")
-                if not payload["live"]:
-                    raise Review("historical/offline message: never auto-replay")
-                if signal.action == "open":
-                    if time.time() - payload["source_time"] > 60:
-                        raise Review("entry waited too long in queue; no stale entry")
-                    if payload["edited"]:
-                        raise Review("edited entry: never open again automatically")
-                    if self.paused() or not self.listener_ready:
-                        raise Review("new entries paused or listener not ready")
-                    await self.open(event, signal)
-                else:
-                    # Pause blocks new risk, not an explicit close of an owned position.
-                    trades = [t for t in self.active() if t["symbol"] == signal.symbol + "_USDT"]
-                    if len(trades) != 1 or (replied and trades[0]["id"] != replied[0]["id"]):
-                        raise Review("no uniquely associated active trade")
-                    trade = trades[0]
-                    trade["version"] += 1  # invalidate an in-flight AI plan first
-                    self.store.save_trade(trade)
-                    if signal.action == "sl":
-                        await self.stop(trade, D(signal.price), "channel")
-                    elif signal.action == "targets":
-                        await self.targets(trade, signal.levels)
-                    elif signal.action == "close":
-                        await self.close_trade(trade)
-                    else:
-                        await self.take_now(trade, signal.action)
-                self.store.finish(event["id"], "done")
-                if signal.reason:
-                    self.store.notice(f"Signal {event['message']}: {signal.reason}")
-            except (Review, GateError, OSError, TimeoutError, ValueError, KeyError) as exc:
-                detail = (
-                    str(exc)
-                    if isinstance(exc, (Review, GateError, ValueError))
-                    else type(exc).__name__
-                )
-                self.store.finish(event["id"], "review", detail)
-                self.store.notice(f"Signal {event['message']} requires review: {detail}")
+            await self.execute_decision(event, signal, self.store.watermark(event["channel"]))
 
-    async def open(self, event, signal):
+    async def execute_decision(self, event, signal, watermark):
+        payload = json.loads(event["payload"])
+        self.store.finish(event["id"], "processing")
+        try:
+            if signal.action in {"ignore", "review"}:
+                if signal.action == "review":
+                    self.store.notice(f"Signal needs review: {event['message']} / {signal.reason}")
+                self.store.finish(event["id"], signal.action, signal.reason)
+                return
+            if not self.enabled:
+                raise Review("deployment disabled")
+            if not payload["live"]:
+                raise Review("historical/offline message: never auto-replay")
+            if self.store.watermark(event["channel"]) != watermark:
+                raise Review("new channel message arrived; stale decision not executed")
+            if signal.action == "open":
+                if self.store.queued():
+                    raise Review("unread channel backlog; no new entry")
+                if time.time() - payload["source_time"] > 60:
+                    raise Review("entry waited too long in queue; no stale entry")
+                if payload["edited"]:
+                    raise Review("edited entry: never open again automatically")
+                if self.paused() or not self.listener_ready:
+                    raise Review("new entries paused or listener not ready")
+                await self.open(event, signal, watermark)
+            else:
+                trade = self.store.trade(signal.target_trade_id)
+                if (
+                    not trade
+                    or trade["status"] in {"closed", "rejected"}
+                    or trade["channel"] != event["channel"]
+                    or (signal.symbol and trade["symbol"] != signal.symbol + "_USDT")
+                ):
+                    raise Review("no uniquely associated active trade")
+                trade["version"] += 1
+                self.store.save_trade(trade)
+                if signal.action == "sl":
+                    await self.stop(trade, D(signal.price), "channel")
+                elif signal.action == "targets":
+                    await self.targets(trade, signal.levels)
+                elif signal.action == "close":
+                    await self.close_trade(trade)
+                elif signal.action == "cancel":
+                    await self.cancel_entry(trade)
+                else:
+                    await self.take_now(trade, signal.action)
+            self.store.finish(event["id"], "done")
+            if signal.reason:
+                self.store.notice(f"Signal {event['message']}: {signal.reason}")
+        except (Review, GateError, OSError, TimeoutError, ValueError, KeyError) as exc:
+            detail = (
+                str(exc) if isinstance(exc, (Review, GateError, ValueError)) else type(exc).__name__
+            )
+            self.store.finish(event["id"], "review", detail)
+            self.store.notice(f"Signal {event['message']} requires review: {detail}")
+
+    async def open(self, event, signal, watermark):
         trade_id = hashlib.sha256(f"{event['channel']}:{event['message']}".encode()).hexdigest()[
             :24
         ]
@@ -193,6 +196,8 @@ class Engine:
             raise Review("limit price not on exchange tick; no silent price change")
         equity = D(account["total"]) + D(account["unrealised_pnl"])
         lots, margin = size_order(equity, account["available"], price, contract)
+        if self.store.watermark(event["channel"]) != watermark:
+            raise Review("new message during entry checks; no stale entry")
         trade = {
             "id": trade_id,
             "channel": event["channel"],
@@ -233,6 +238,8 @@ class Engine:
             verified = await self.gate.get(f"/positions/{symbol}")
             if not isolated_position(verified) or D(verified["size"]) != 0:
                 raise Review(f"isolated {LEVERAGE}x could not be verified")
+            if self.store.watermark(event["channel"]) != watermark:
+                raise Review("new message before order submission; no stale entry")
             body = {
                 "contract": symbol,
                 "size": lots if signal.side == "long" else -lots,
@@ -325,7 +332,7 @@ class Engine:
             self.store.save_trade(trade)
             self.store.notice(
                 f"Fill confirmed: {trade['symbol']} {filled} contracts @ {trade['entry_price']}. "
-                "AI exit planning queued; entry is not waiting for the model."
+                "AI exit planning queued; channel intent was already interpreted."
             )
             if trade.get("channel_levels", {}).get("sl") and not trade["source_sl"]:
                 await self.stop(trade, D(trade["channel_levels"]["sl"]), "channel")
@@ -640,6 +647,16 @@ class Engine:
         # Old native stop remains active until the replacement is accepted.
         await self.stop(trade, D(old["price"]), "channel" if trade["source_sl"] else "ai")
         await self.cancel_retired_stops(trade)
+
+    async def cancel_entry(self, trade):
+        """Cancel unfilled entry quantity, preserving fills and their protective exits."""
+        await self.cancel_regular(trade, trade["entry_id"], "channel-cancel")
+        await self.refresh(trade)
+        if trade.get("position_size"):
+            self.store.notice(
+                f"Entry cancellation checked: {trade['symbol']}; a filled position remains. "
+                "Cancellation is not a close instruction; protection is retained."
+            )
 
     async def close_trade(self, trade):
         trade["close_requested"] = True
