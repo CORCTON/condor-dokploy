@@ -9,7 +9,7 @@ from legacy_signal_fixture import parse
 from trader.app import make_app
 from trader.engine import Engine, Review, size_order
 from trader.gate import GateError
-from trader.models import Plan
+from trader.models import Plan, Signal
 from trader.store import Store
 
 CONTRACT = {
@@ -566,17 +566,74 @@ async def test_combined_addon_and_stop_only_changes_stop(rig):
     assert rig[1].stops["100"]["trigger"]["price"] == "10.75"
 
 
-@pytest.mark.parametrize("delay", [65, 120, 600])
-async def test_live_open_is_not_discarded_for_delivery_or_model_delay(rig, delay):
+@pytest.mark.parametrize("delay", [59, 60, 60.001, 65, 120, 600])
+@pytest.mark.parametrize("price", [None, "10.20"])
+async def test_entry_age_limit_uses_publication_time(rig, monkeypatch, delay, price):
     store, exchange, engine = rig
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
     store.set("entries_started_after", time.time() - delay - 10)
     key = store.event(-100123, 1, "#INJ 当前价格入场一笔空单", None, time.time() - delay, True)
     await engine.process(
         store.db.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone(),
-        parse("#INJ 当前价格入场一笔空单"),
+        Signal(action="open", symbol="INJ", side="short", price=price),
     )
-    assert len(exchange.orders) == 1
+    event = store.db.execute("SELECT status,detail FROM events WHERE id=?", (key,)).fetchone()
+    if delay <= 60:
+        assert len(exchange.orders) == 1 and event["status"] == "done"
+    else:
+        assert not exchange.writes and event["status"] == "review"
+        assert "60 seconds" in event["detail"]
+
+
+async def test_entry_expiring_during_exchange_checks_is_not_submitted(rig, monkeypatch):
+    store, exchange, engine = rig
+    now = time.time()
+    clock = [now]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    original_get = exchange.get
+    position_reads = 0
+
+    async def delayed_get(path, **params):
+        nonlocal position_reads
+        if path.startswith("/positions/"):
+            position_reads += 1
+            if position_reads == 2:
+                clock[0] += 2  # the final leverage verification crosses the age limit
+        return await original_get(path, **params)
+
+    monkeypatch.setattr(exchange, "get", delayed_get)
+    key = store.event(-100123, 1, "entry", None, now - 59, True)
+    await engine.process(
+        store.db.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone(),
+        Signal(action="open", symbol="INJ", side="short"),
+    )
+    assert not exchange.orders and exchange.position["size"] == 0
+    assert store.trades()[0]["status"] == "rejected"
+    assert "60 seconds" in store.db.execute(
+        "SELECT detail FROM events WHERE id=?", (key,)
+    ).fetchone()[0]
+
+
+@pytest.mark.parametrize("action", ["close", "cancel", "sl", "tp1", "tp2", "targets"])
+async def test_delayed_trade_management_is_not_blocked_by_entry_age_limit(rig, action):
+    store, exchange, engine = rig
+    trade = await signal(
+        rig, "#INJ 在10.20限价入场空单" if action == "cancel" else "#INJ 当前价格入场一笔空单"
+    )
+    if action != "cancel":
+        job = await engine.claim_plan()
+        await engine.apply_plan(job["trade_id"], job["version"], job["lease"], plan())
+    writes_before = len(exchange.writes)
+    key = store.event(-100123, 2, "management", 1, time.time() - 120, True)
+    await engine.process(
+        store.db.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone(),
+        Signal(action=action, symbol="INJ", target_trade_id=trade["id"],
+               price="10.50" if action == "sl" else None,
+               levels={"tp1": "8.50"} if action == "targets" else {}),
+    )
     assert store.db.execute("SELECT status FROM events WHERE id=?", (key,)).fetchone()[0] == "done"
+    assert len(exchange.writes) > writes_before
 
 
 async def test_sl_receipt_crash_recovers_existing_stop(rig):

@@ -167,6 +167,8 @@ class Engine:
                     raise Review("entry predates operator activation; no catch-up entry")
                 if self.store.queued():
                     raise Review("unread channel backlog; no new entry")
+                if time.time() - payload["source_time"] > 60:
+                    raise Review("entry signal older than 60 seconds; no new entry")
                 if payload["edited"]:
                     raise Review("edited entry: never open again automatically")
                 if self.paused() or not self.listener_ready:
@@ -280,6 +282,8 @@ class Engine:
                 raise Review(f"isolated {LEVERAGE}x could not be verified")
             if self.store.watermark(event["channel"]) != watermark:
                 raise Review("new message before order submission; no stale entry")
+            if time.time() - json.loads(event["payload"])["source_time"] > 60:
+                raise Review("entry signal older than 60 seconds; no new entry")
             body = {
                 "contract": symbol,
                 "size": lots if signal.side == "long" else -lots,
