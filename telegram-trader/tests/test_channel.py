@@ -1,10 +1,13 @@
+import asyncio
 import datetime
+import json
+import time
 from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from trader.app import make_app
+from trader.app import follow_new_messages, make_app, receive_message
 from trader.channel import ChannelReader, describe_message
 from trader.engine import Engine
 from trader.store import Store
@@ -122,3 +125,83 @@ def test_media_change_creates_new_event_revision():
         assert store.event(**kwargs)
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("delay,live", [(65, True), (120, True), (601, False)])
+def test_receipt_uses_connection_boundary_not_message_age(delay, live):
+    store = Store(":memory:")
+    try:
+        engine = Engine(store, None)
+        engine.listener_ready = True
+        now = time.time()
+        msg = message(101)
+        msg.date = datetime.datetime.fromtimestamp(now - delay, datetime.UTC)
+        receive_message(engine, 1, msg, now - 600)
+        assert json.loads(store.queued()[0]["payload"])["live"] is live
+        receive_message(engine, 1, msg, now - 600)  # push after tail is the same event
+        assert len(store.queued()) == 1
+    finally:
+        store.close()
+
+
+async def test_tail_only_fetches_after_head_and_deduplicates_push(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="trader")
+    store = Store(":memory:")
+    engine = Engine(store, None)
+    engine.listener_ready = True
+    live_since = time.time() - 600
+    posts = [message(101), message(102)]
+    receive_message(engine, 1, posts[0], live_since)
+    cursors = []
+
+    class Client:
+        async def iter_messages(self, peer, **kwargs):
+            assert peer == "allowed" and kwargs["reverse"] and kwargs["limit"] is None
+            cursors.append(kwargs["min_id"])
+            for msg in posts:
+                if msg.id > kwargs["min_id"]:
+                    yield msg
+
+    sleeps = []
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await follow_new_messages(Client(), "allowed", 100, engine, 1, live_since)
+        assert cursors == [100, 102]
+        assert [r["message"] for r in store.queued()] == [101, 102]
+        assert sleeps == [3, 3, 3]
+        receipts = [record.message for record in caplog.records if "received;" in record.message]
+        assert len(receipts) == 2
+        assert "via=push" in receipts[0] and "via=history" in receipts[1]
+        assert all("delivery_seconds=" in line for line in receipts)
+    finally:
+        store.close()
+
+
+async def test_tail_obeys_flood_wait_without_stopping_push(monkeypatch):
+    from telethon.errors import FloodWaitError
+
+    class Client:
+        async def iter_messages(self, *args, **kwargs):
+            raise FloodWaitError(request=None, capture=7)
+            yield  # async generator, same contract as Telethon
+
+    sleeps = []
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    engine = SimpleNamespace(listener_ready=True)
+    with pytest.raises(asyncio.CancelledError):
+        await follow_new_messages(Client(), "allowed", 100, engine, 1, time.time())
+    assert sleeps == [3, 7, 3]
+    assert engine.listener_ready

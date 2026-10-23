@@ -214,6 +214,18 @@ async def test_control_http_auth_status_and_idempotency(controlled):
         assert engine.paused() and not exchange.writes
 
 
+async def test_status_exposes_rejected_signal_even_with_healthy_heartbeat(controlled):
+    store, _, engine = controlled
+    key = store.event(1, 15368, "#FIL 当前价格入场一笔多单", None, time.time(), True)
+    store.finish(key, "review", "fixture rejection")
+    async with TestClient(TestServer(make_app(engine, credentials=ready_credentials()))) as client:
+        response = await client.get("/status", headers={"Authorization": "Bearer fixture"})
+        state = await response.json()
+        assert state["listener_ready"]
+        assert state["last_review"]["message_id"] == 15368
+        assert state["last_review"]["reason"] == "fixture rejection"
+
+
 def routine(monkeypatch):
     base = ModuleType("routines.base")
     base.RoutineResult = SimpleNamespace

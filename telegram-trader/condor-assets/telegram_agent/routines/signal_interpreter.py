@@ -27,7 +27,11 @@ Use read_channel_message to follow replies, read_channel_history to search/pagin
 earlier context, view_channel_image for original historical images, and read_execution_state
 for exact owned trade IDs. Evidence tools are READ ONLY; the submit tool only stages
 a validated proposal, never an order. Correct parameter errors through tool calling.
-After the proposal is accepted, end your turn without claiming execution occurred.
+An accepted proposal is final and can execute immediately; the turn ends at acceptance.
+Do not submit tentative proposals or rely on a later revision of an accepted proposal.
+For an explicit complete entry, use the supplied evidence and submit promptly; additional
+market research or an exit plan is not required before entry. Retrieve context when it is
+actually needed to resolve the instruction. Never skip ambiguous context to be faster.
 When an instruction omits a symbol (e.g. 平掉/离场/撤掉), retrieve its reply/context.
 Do not simply choose the latest trade if several interpretations remain plausible.
 Evidence message IDs and a concrete reason are mandatory. Preserve channel numeric levels.
@@ -164,10 +168,15 @@ async def interpret_current(job, owner, session):
     try:
         async with asyncio.timeout(150):
             while not task.done():
-                await asyncio.wait({task}, timeout=1)
-                state = await api(session, "GET", f"/signals/{job['lease']}/fresh")
-                if not state["fresh"]:
-                    return None
+                await asyncio.wait({task}, timeout=0.25)
+                try:
+                    result = await api(session, "GET", f"/signals/{job['lease']}/proposal")
+                except aiohttp.ClientResponseError as exc:
+                    if exc.status == 409:  # superseded messages/state, not an executable proposal
+                        return None
+                    raise
+                if result is not None:
+                    return result  # no final model summary is required after validated tool use
             return await task
     finally:
         if not task.done():

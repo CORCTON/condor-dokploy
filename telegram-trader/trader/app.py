@@ -69,6 +69,10 @@ def make_app(engine, channel=None, credentials=None):
         )
 
     async def status(request):
+        last_review = engine.store.db.execute(
+            "SELECT message AS message_id,received AS received_at,detail AS reason "
+            "FROM events WHERE status='review' ORDER BY received DESC,rowid DESC LIMIT 1"
+        ).fetchone()
         return web.json_response(
             {
                 "enabled": engine.enabled,
@@ -91,6 +95,7 @@ def make_app(engine, channel=None, credentials=None):
                     "SELECT COUNT(*) FROM events WHERE status IN ('queued','analyzing')"
                 ).fetchone()[0],
                 "unknown_writes": len(engine.store.unknowns()),
+                "last_review": dict(last_review) if last_review else None,
                 "trades": [
                     {
                         k: t.get(k)
@@ -264,31 +269,33 @@ async def listen(engine, channel):
             peer = await client.get_entity(os.getenv("TG_CHANNEL", "") or channel_id)
             if utils.get_peer_id(peer) != channel_id:
                 raise Review("Telegram channel ID does not match configured peer")
+            head = await client.get_messages(peer, limit=1)
+            cursor = head[0].id if head else 0
             channel.client, channel.peer = client, peer
             live_since = time.time()
 
             async def incoming(event, live_since=live_since, channel_id=channel_id):
-                message = event.message
-                source_time = message.date.timestamp()
-                edited = isinstance(event, events.MessageEdited.Event)
-                if edited and message.edit_date:
-                    source_time = message.edit_date.timestamp()
-                fresh = live_since <= source_time and time.time() - source_time <= 60
-                engine.store.event(
-                    channel_id,
-                    message.id,
-                    message.message or "",
-                    message.reply_to_msg_id,
-                    source_time,
-                    fresh and engine.listener_ready,
-                    edited,
-                    media=describe_message(message)["media"],
+                receive_message(
+                    engine, channel_id, event.message, live_since,
+                    edited=isinstance(event, events.MessageEdited.Event),
                 )
 
             client.add_event_handler(incoming, events.NewMessage(chats=peer))
             client.add_event_handler(incoming, events.MessageEdited(chats=peer))
             engine.listener_ready = True
-            await client.run_until_disconnected()
+            log.info("Channel listener ready; push enabled; new-message reconciliation every 3s")
+            tail = asyncio.create_task(
+                follow_new_messages(client, peer, cursor, engine, channel_id, live_since)
+            )
+            connection = asyncio.create_task(client.run_until_disconnected())
+            try:
+                done, _ = await asyncio.wait({tail, connection}, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    task.result()
+            finally:
+                tail.cancel()
+                connection.cancel()
+                await asyncio.gather(tail, connection, return_exceptions=True)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 -- listener boundary must fail closed
@@ -299,6 +306,46 @@ async def listen(engine, channel):
             channel.client, channel.peer = None, None
             await client.disconnect()
         await asyncio.sleep(5)
+
+
+def receive_message(engine, channel_id, message, live_since, *, edited=False, via="push"):
+    source_time = message.date.timestamp()
+    if edited and message.edit_date:
+        source_time = message.edit_date.timestamp()
+    key = engine.store.event(
+        channel_id, message.id, message.message or "", message.reply_to_msg_id,
+        source_time, live_since <= source_time and engine.listener_ready,
+        edited, media=describe_message(message)["media"],
+    )
+    if key:
+        log.info("Channel message %s received; delivery_seconds=%.3f; edited=%s; via=%s",
+                 message.id, time.time() - source_time, edited, via)
+
+
+async def follow_new_messages(client, peer, cursor, engine, channel_id, live_since):
+    """Reconcile new posts if push delivery is delayed; both paths share durable deduplication.
+
+    The cursor starts at the connection's current head, never at historical signals.
+    Edits remain push events. Respect Telegram's flood wait rather than retrying it.
+    """
+    from telethon.errors import FloodWaitError, RPCError
+
+    while True:
+        await asyncio.sleep(3)
+        try:
+            async for message in client.iter_messages(
+                peer, min_id=cursor, reverse=True, limit=None, wait_time=3
+            ):
+                if getattr(message, "date", None) and getattr(message, "message", None) is not None:
+                    receive_message(engine, channel_id, message, live_since, via="history")
+                cursor = max(cursor, message.id)
+        except FloodWaitError as exc:
+            log.warning("Channel new-message check rate-limited; retry in %s seconds", exc.seconds)
+            await asyncio.sleep(exc.seconds)
+        except (RPCError, OSError, TimeoutError) as exc:
+            log.warning("Channel new-message check failed: %s; push listener remains active",
+                        type(exc).__name__)
+            await asyncio.sleep(3)
 
 
 async def reconcile(engine):

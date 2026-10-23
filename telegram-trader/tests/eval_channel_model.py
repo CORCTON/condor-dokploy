@@ -158,12 +158,14 @@ async def case(module, name, texts, expected, trade=None, image=None):
     for i, text in enumerate(texts, start=101):
         reply = 100 if trade and name != "unowned_exit_is_noop" else None
         source[i] = msg(i, text, reply)
+        published_at = time.time() - 65 if name == "delayed_explicit_market_entry" else time.time()
+        source[i]["source_time"] = published_at
         store.event(
             -100123,
             i,
             text,
             reply,
-            time.time(),
+            published_at,
             True,
             media={"id": "fixture-image", "mime": "image/png"} if image else None,
         )
@@ -179,7 +181,7 @@ async def case(module, name, texts, expected, trade=None, image=None):
     try:
         async with aiohttp.ClientSession() as session:
             result = await asyncio.wait_for(
-                module.generate_decisions(job, int(os.environ["ADMIN_USER_ID"]), session), 150
+                module.interpret_current(job, int(os.environ["ADMIN_USER_ID"]), session), 150
             )
         decisions = Decisions.model_validate(result)
         actual = [d.action for d in decisions.decisions]
@@ -228,6 +230,12 @@ async def main():
     spec.loader.exec_module(module)
     os.environ["TRADER_TOKEN"] = "isolated-model-eval-not-a-production-token"
     cases = [
+        (
+            "delayed_explicit_market_entry",
+            ["#FIL\n當前價格入場一筆多單📈", "我的開倉價：0.9958"],
+            ["open", "ignore"], None, None,
+        ),
+        ("explicit_limit_entry", ["#INJ 在8.63限价开一笔空单"], ["open"], None, None),
         (
             "open_then_cancel_before_execution",
             ["#INJ 当前价格入场一笔空单", "算了，这笔撤掉，不做了"],

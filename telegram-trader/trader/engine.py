@@ -167,8 +167,6 @@ class Engine:
                     raise Review("entry predates operator activation; no catch-up entry")
                 if self.store.queued():
                     raise Review("unread channel backlog; no new entry")
-                if time.time() - payload["source_time"] > 60:
-                    raise Review("entry waited too long in queue; no stale entry")
                 if payload["edited"]:
                     raise Review("edited entry: never open again automatically")
                 if self.paused() or not self.listener_ready:

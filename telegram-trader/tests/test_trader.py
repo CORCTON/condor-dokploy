@@ -566,14 +566,17 @@ async def test_combined_addon_and_stop_only_changes_stop(rig):
     assert rig[1].stops["100"]["trigger"]["price"] == "10.75"
 
 
-async def test_stale_queued_open_does_not_trade(rig):
+@pytest.mark.parametrize("delay", [65, 120, 600])
+async def test_live_open_is_not_discarded_for_delivery_or_model_delay(rig, delay):
     store, exchange, engine = rig
-    key = store.event(-100123, 1, "#INJ 当前价格入场一笔空单", None, time.time() - 120, True)
+    store.set("entries_started_after", time.time() - delay - 10)
+    key = store.event(-100123, 1, "#INJ 当前价格入场一笔空单", None, time.time() - delay, True)
     await engine.process(
         store.db.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone(),
         parse("#INJ 当前价格入场一笔空单"),
     )
-    assert not exchange.writes
+    assert len(exchange.orders) == 1
+    assert store.db.execute("SELECT status FROM events WHERE id=?", (key,)).fetchone()[0] == "done"
 
 
 async def test_sl_receipt_crash_recovers_existing_stop(rig):
