@@ -134,7 +134,6 @@ def assert_effects(spec, decisions, before, after, aliases, engine, exchange, ev
             if actual.action not in {"ignore", "review"}:
                 guard_reason = {
                     "derived_old_entry_age_guard": "entry signal older than 60 seconds",
-                    "derived_edited_open_not_reopen": "edited entry: never open again",
                     "derived_TP1_no_plan": "TP allocation not established yet",
                     "derived_opposite_entry_without_close": "same-symbol trade already active",
                 }[spec["name"]]
@@ -364,9 +363,6 @@ async def run_case(spec, interpreter, planner, history, image_cache, run_number)
             if spec["name"] == "derived_fifth_image_explicit_entry":
                 assert {"op": "image", "message_id": 20004} in channel.calls, "Fifth source image was not inspected"
             report["execution_passed"] = True
-            report["semantic_policy_strict"] = not (
-                spec["name"] == "derived_edited_open_not_reopen" and any(d.action == "open" for d in decisions)
-            )
             if spec["name"] in {"real_FIL_market_long", "real_INJ_market_short"} and not errors:
                 plan_started = time.monotonic()
                 plan_job = await interpreter.api(session, "POST", "/jobs/claim")

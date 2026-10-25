@@ -3,7 +3,7 @@
 import asyncio
 
 import pytest
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import ClientSession, web
 from test_channel import reader as reader  # noqa: PLC0414 -- shared source fixture
 
 from trader import channel as channel_module
@@ -32,7 +32,7 @@ async def image_server(reader, monkeypatch):
 async def test_disconnected_client_does_not_leave_image_lock_owned_forever(
     reader, image_server, monkeypatch
 ):
-    monkeypatch.setattr(channel_module, "IMAGE_TIMEOUT_SECONDS", 0.08)
+    monkeypatch.setattr(channel_module, "IMAGE_TIMEOUT_SECONDS", 0.3)
     entered, cancelled = asyncio.Event(), asyncio.Event()
     download = reader.client.download_media
 
@@ -48,12 +48,20 @@ async def test_disconnected_client_does_not_leave_image_lock_owned_forever(
     monkeypatch.setattr(reader.client, "download_media", first_download_hangs)
     headers = {"Authorization": "Bearer image-deadline-only"}
     async with ClientSession() as session:
-        with pytest.raises(TimeoutError):
-            async with session.get(image_server, headers=headers,
-                                   timeout=ClientTimeout(total=0.02)) as response:
+        async def request():
+            async with session.get(image_server, headers=headers) as response:
                 await response.read()
-        assert entered.is_set() and reader.image_lock.locked()
-        await asyncio.wait_for(cancelled.wait(), 0.5)
+
+        # Disconnect only after the server owns the lock. A 20 ms client timeout
+        # could expire during connection setup on a busy test runner instead.
+        pending = asyncio.create_task(request())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            assert reader.image_lock.locked()
+        finally:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        await asyncio.wait_for(cancelled.wait(), 1)
         await asyncio.sleep(0)
         assert not reader.image_lock.locked()
         async with session.get(image_server, headers=headers) as response:

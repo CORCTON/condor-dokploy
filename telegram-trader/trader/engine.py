@@ -199,8 +199,6 @@ class Engine:
                     raise Reanalyze("unread channel backlog; reanalyze before entry")
                 if time.time() - payload["source_time"] > 60:
                     raise Review("entry signal older than 60 seconds; no new entry")
-                if payload["edited"]:
-                    raise Review("edited entry: never open again automatically")
                 if self.paused() or not self.listener_ready:
                     raise Review("new entries paused or listener not ready")
                 await self.open(event, signal, watermark)
@@ -249,10 +247,10 @@ class Engine:
             :24
         ]
         previous = self.store.trade(trade_id)
-        if previous and (
-            previous["status"] != "deferred_entry"
-            or self.store.operation(trade_id + ":entry")
-            or self.store.unknowns()
+        # Revisions share this entry identity. An edit can authorize a first
+        # entry, but never resend a prior durable intent, even without its trade row.
+        if self.store.operation(trade_id + ":entry") or (
+            previous and (previous["status"] != "deferred_entry" or self.store.unknowns())
         ):
             raise Review("entry already recorded")
         symbol = signal.symbol + "_USDT"

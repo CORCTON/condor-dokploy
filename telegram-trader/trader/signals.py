@@ -174,6 +174,16 @@ class SignalInbox:
                     raise Review("management requires an exact owned trade from this channel")
                 if decision.symbol and decision.symbol + "_USDT" != trade["symbol"]:
                     raise Review("symbol and target trade disagree")
+                event = self.store.db.execute(
+                    "SELECT payload FROM events WHERE id=?", (decision.event_id,)
+                ).fetchone()
+                # Only explicit stored reply links bind ownership. Evidence IDs
+                # may include unrelated context and must not choose the target.
+                related = self.store.reply_trade(
+                    job["channel"], json.loads(event["payload"]).get("reply")
+                )
+                if related and related["id"] != trade["id"]:
+                    raise Review("explicit reply references a different owned trade")
         return expected
 
     async def propose(self, lease, decisions):

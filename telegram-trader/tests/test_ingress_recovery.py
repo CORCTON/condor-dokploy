@@ -38,7 +38,10 @@ def edited(message_id, text, revision):
     return result
 
 
-async def test_history_edit_before_push_cannot_become_a_new_entry(inbox):
+@pytest.mark.parametrize("live_before_publication", [False, True])
+async def test_polled_edit_before_push_preserves_original_entry_eligibility(
+    inbox, live_before_publication,
+):
     now = time.time()
     post = edited(101, "INJ 当前价格入场一笔空单", now - 1)
 
@@ -49,14 +52,15 @@ async def test_history_edit_before_push_cannot_become_a_new_entry(inbox):
         async def get_messages(self, peer, ids):
             return post
 
-    await collect_new_messages(Client(), "allowed", 100, inbox.engine, -100123, now - 60)
-    receive_message(inbox.engine, -100123, post, now - 60, edited=True)
+    live_since = now - 60 if live_before_publication else now
+    await collect_new_messages(Client(), "allowed", 100, inbox.engine, -100123, live_since)
+    receive_message(inbox.engine, -100123, post, live_since, edited=True)
     job = await inbox.claim()
     assert len(job["events"]) == 1
     assert job["events"][0]["edited"] is True
     assert job["events"][0]["source_time"] == post.date.timestamp()
     await apply(inbox, job["lease"], answer(job, symbol="INJ", side="short"))
-    assert not inbox.engine.gate.orders
+    assert len(inbox.engine.gate.orders) == int(live_before_publication)
 
 
 async def test_newer_edit_supersedes_pending_revision_and_rejects_delayed_old_push(inbox):

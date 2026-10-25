@@ -237,6 +237,10 @@ def make_app(engine, channel=None, credentials=None):
                 for event_id in json.loads(job["event_ids"])
             ]
             ids = list(dict.fromkeys(row["message"] for row in rows))
+            eligible = {
+                row["message"]: json.loads(row["payload"]).get("entry_eligible", False)
+                for row in rows
+            }
             # Polling new message IDs cannot see an edited cancellation. Verify
             # the claimed source versions immediately before applying a proposal.
             try:
@@ -251,7 +255,8 @@ def make_app(engine, channel=None, credentials=None):
                                     )
                         else:
                             receive_message(
-                                engine, job["channel"], message, time.time(), via="verification"
+                                engine, job["channel"], message, time.time(), via="verification",
+                                entry_eligible=eligible[message_id],
                             )
             except TimeoutError as exc:
                 raise web.HTTPServiceUnavailable(
@@ -420,7 +425,9 @@ async def listen(engine, channel):
         await asyncio.sleep(5)
 
 
-def receive_message(engine, channel_id, message, live_since, *, edited=False, via="push"):
+def receive_message(
+    engine, channel_id, message, live_since, *, edited=False, via="push", entry_eligible=None,
+):
     source_time = message.date.timestamp()
     edited_at = message.edit_date.timestamp() if message.edit_date else None
     edited = edited or edited_at is not None
@@ -429,7 +436,9 @@ def receive_message(engine, channel_id, message, live_since, *, edited=False, vi
         source_time, True,
         edited, media=describe_message(message)["media"],
         edited_at=edited_at,
-        entry_eligible=live_since <= source_time,
+        # Source verification inherits the claimed delivery's eligibility; it
+        # must not treat verification time as a new listener activation.
+        entry_eligible=live_since <= source_time if entry_eligible is None else entry_eligible,
     )
     if key:
         log.info("Channel message %s received; delivery_seconds=%.3f; edited=%s; via=%s",

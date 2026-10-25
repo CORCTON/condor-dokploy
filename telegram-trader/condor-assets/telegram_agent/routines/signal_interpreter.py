@@ -63,6 +63,22 @@ breakouts, forecasts, future possibilities, retrospective reports and promotiona
 do NOT authorize an entry. The operator has deferred automatic breakout monitoring.
 Do not reinterpret 突破后做多 as open now. Do not create conditions or add-on entries.
 For a conditional idea choose ignore with the reason that automatic monitoring is disabled.
+Establish the instruction to PLACE an entry before choosing its order type. A directional
+bias, technical setup, projected chart arrow, or suggestion to prepare a right-side trade
+is not by itself permission to enter immediately. Missing an entry price does NOT convert
+such a setup into a market order. If execution now versus waiting for a trigger is unclear,
+choose review; if a future trigger is explicit, choose ignore as a conditional idea.
+A colloquial but unconditional trade instruction such as 可以做一筆空單 can authorize a
+market entry without literally saying 現在 or 市價. Conversely, 可以進行右側空頭設置 in
+a pattern discussion does not establish when to execute. Read the whole source and needed
+context, not isolated keywords. 當前價格入場一筆多單，進行突破博弈 explicitly enters now;
+the mention of a breakout does not make that immediate entry conditional.
+For open, the reason must identify the concrete source words or explicit image instruction
+authorizing this entry, and explain why it is unconditional now or an exact-price limit
+order. Use price=null only after establishing market-entry intent, never to fill an unknown
+order type or price. A position/PnL screenshot, existing order annotation, chart level or
+arrow alone is not a new-entry command. An image can authorize entry only when it actually
+contains an explicit current instruction; do not infer authorization from its geometry.
 Multiple incompatible actions in one event or undefined partial allocations require review.
 TP1/TP2 actions execute ONLY the existing owned allocation, not an arbitrary amount.
 Check the entire instruction against that allocation: a request to leave a runner or
@@ -80,8 +96,13 @@ trade commands. entry_eligible=false forbids a new entry, including restart reco
 it does NOT prohibit managing a currently owned position. For recovered messages, use
 the latest channel context and owned execution state to resolve superseding cancellations,
 replacements and already-completed actions; never mechanically replay an old exit/update.
-Mark historical/offline entries ignore. Edited opening messages must not
-reopen a trade; explicit cancellation or management edits can apply to an existing trade.
+Mark historical/offline entries ignore. An edit alone neither authorizes nor prohibits
+an entry: classify a fresh, entry-eligible edited revision by the same explicit-intent rules.
+If the supplied owned state already associates an entry with that message, do not duplicate
+it. The executor checks durable prior entry attempts, including closed trades, and the
+original source-age limit; do not invent unavailable past execution records. A changed
+position/PnL report is not a new entry. Explicit cancellation or management edits can apply
+to the associated existing trade.
 If more_queued is true, still classify the intended action: the executor defers openings
 until the backlog is analyzed. When backlog_deferred=true, read events AND context_events
 before deciding again, checking later cancellations/exits or replacements after that message
