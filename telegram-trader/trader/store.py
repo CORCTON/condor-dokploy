@@ -157,7 +157,8 @@ class Store:
         row = self.db.execute("SELECT data FROM trades WHERE id=?", (key,)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def reply_trade(self, channel, message):
+    def reply_lineage(self, channel, message):
+        """Return the first owned source and earliest explicit anchor visited."""
         seen = set()
         while message and message not in seen and len(seen) < 20:
             seen.add(message)
@@ -165,14 +166,16 @@ class Store:
                 t for t in self.trades() if t["channel"] == channel and t["message"] == message
             ]
             if matches:
-                return matches[0]
+                # An entry may itself quote an older setup; its owned identity
+                # ends this management lineage rather than inheriting that setup.
+                return matches[0], min(seen)
             row = self.db.execute(
                 "SELECT payload FROM events WHERE channel=? AND message=? "
                 "ORDER BY received DESC LIMIT 1",
                 (channel, message),
             ).fetchone()
             message = json.loads(row[0]).get("reply") if row else None
-        return None
+        return None, min(seen, default=None)
 
     def operation(self, key):
         row = self.db.execute("SELECT * FROM operations WHERE id=?", (key,)).fetchone()

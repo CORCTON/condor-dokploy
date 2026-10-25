@@ -179,11 +179,15 @@ class SignalInbox:
                 ).fetchone()
                 # Only explicit stored reply links bind ownership. Evidence IDs
                 # may include unrelated context and must not choose the target.
-                related = self.store.reply_trade(
+                related, earliest_reply = self.store.reply_lineage(
                     job["channel"], json.loads(event["payload"]).get("reply")
                 )
                 if related and related["id"] != trade["id"]:
                     raise Review("explicit reply references a different owned trade")
+                # Channel message IDs increase monotonically. Even an unowned
+                # or missing old source cannot refer to an entry published later.
+                if earliest_reply is not None and trade["message"] > earliest_reply:
+                    raise Review("explicit reply predates the target trade entry")
         return expected
 
     async def propose(self, lease, decisions):

@@ -151,7 +151,7 @@ async def signal(
     key = store.event(-100123, message, text, reply, time.time(), live, edited)
     if key:
         event = store.db.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone()
-        reference = store.reply_trade(event["channel"], reply)
+        reference, _ = store.reply_lineage(event["channel"], reply)
         decision = parse(text, reference["symbol"].removesuffix("_USDT") if reference else None)
         if decision.action not in {"open", "ignore", "review"}:
             matches = [t for t in engine.active() if t["symbol"] == decision.symbol + "_USDT"]
