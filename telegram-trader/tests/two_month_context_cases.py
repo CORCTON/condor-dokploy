@@ -1,11 +1,14 @@
 """Real current-revision messages with deliberately constructed owned state.
 
-These eight cases supplement, never replace, the frozen 17 owned-state and 10
+These twelve cases supplement, never replace, the frozen 17 owned-state and 10
 entry-intent goldens. Prices, orders and fills are synthetic, not a backtest.
 Original source text/images/history must not be rewritten to fit the seeds.
 """
 
+from copy import deepcopy
+
 from comprehensive_cases import case, decision, trade
+from two_month_owned_cases import CASES as OWNED_CASES
 
 CASES = [
     case(
@@ -111,7 +114,13 @@ for item in CASES:
     item["expectation_scope"] = "current_revision_context_with_constructed_owned_state"
     item["state_origin"] = "synthetic_positions_orders_and_fills_not_historical_execution"
 
-assert len(CASES) == len({item["name"] for item in CASES}) == 8
+for original in (CASES[1], next(item for item in OWNED_CASES if item["events"] == [15284])):
+    for repetition in (1, 2):
+        repeated = deepcopy(original)
+        repeated["name"] = original["name"] + f"_independent_repeat_{repetition}"
+        CASES.append(repeated)
+
+assert len(CASES) == len({item["name"] for item in CASES}) == 12
 
 
 def assert_context_report(spec, report):
@@ -120,10 +129,10 @@ def assert_context_report(spec, report):
     actions = spec["expected"][0]["action"]
     if set(actions if isinstance(actions, list) else [actions]) <= {"ignore", "review"}:
         assert report["exchange_writes"] == [], "Context-only message mutated exchange state"
-        before = report["owned_before"]["A"]
-        after, = report["owned_after"]
-        for key in ("id", "symbol", "side", "message", "entry_id", "filled", "exits"):
-            assert after[key] == before[key], (key, before[key], after[key])
+        before = {trade["id"]: trade for trade in report["owned_before"].values()}
+        after = {trade["id"]: trade for trade in report["owned_after"]}
+        assert len(after) == len(report["owned_after"]), "Duplicate owned trade IDs"
+        assert after == before, "Context-only message mutated owned trades"
     if spec.get("require_source_image"):
         assert {"op": "download", "message_id": spec["events"][0]} in report["tools"], (
             "An image-only semantic pass requires the actual frozen image to be read"

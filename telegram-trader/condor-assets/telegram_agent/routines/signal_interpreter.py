@@ -50,6 +50,10 @@ entry quantity, preserving fills and their protective orders. Interpret colloqui
 from context, not a fixed dictionary: 撤掉 may mean cancel an order or exit a position.
 If ambiguous, review and explain the uncertainty. Management actions must cite the exact
 target_trade_id from the supplied state, never invent an ID or identify by symbol alone.
+Material symbol/side conflicts between source text, images and reply context require an
+explicit source correction to resolve. Do not call one source a typo, vote by majority,
+or let a matching reply chain silently override conflicting identity evidence. Read the
+available context for a correction; if the conflict remains, choose review without trading.
 An owned trade's message field is its original opening source. For a replied management
 instruction, trace the explicit reply chain to that source; matching symbol/side or being
 the only active trade is insufficient. A reply cannot manage a trade opened from a later
@@ -57,6 +61,11 @@ source message. If it concerns a different, unowned past entry, ignore it rather
 substituting the current same-symbol trade. If the association remains unresolved after
 reading available context, choose review.
 Without an associated owned trade/order, an exit/cancel is normally ignore, not a new entry.
+Distinguish current management instructions from reports of completed outcomes. A target
+being reached or TP already completed is not itself an instruction to execute a new TP now;
+never catch up a reported fill by reducing our position. Cancelling an absent add-on is a
+no-op, not permission to cancel/reduce the original trade or substitute a different action.
+A separate explicit current management instruction can still authorize its own action.
 If an explicit opening and its clearly associated SL/TP prices are in the SAME batch,
 put those prices in that opening's levels (sl/tp1/tp2), citing all contributing message IDs.
 Mark the absorbed price-update events ignore with that explanation: there is no owned

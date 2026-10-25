@@ -48,7 +48,7 @@ SOURCES = {
 
 SUI_COST = next(spec for spec in OWNED_CASES if spec["events"] == [15069])
 HYPE_REVIEW = next(spec for spec in OWNED_CASES if spec["events"] == [14960])
-PRIMARY_CASES = CASES[4:] + [SUI_COST]
+PRIMARY_CASES = CASES[4:8] + [SUI_COST]
 
 
 @pytest.mark.parametrize("spec", CASES[:4], ids=lambda spec: spec["name"])
@@ -217,12 +217,43 @@ def test_context_cases_do_not_mutate_other_frozen_golden_collections():
     from two_month_owned_cases import CASES as owned
 
     assert len(entry) == 10 and len(owned) == 17
-    assert len(CASES) == 8
+    assert len(CASES) == 12
     assert [spec["events"][0] for spec in CASES[:4]] == [14996, 15184, 15196, 15355]
-    assert {spec["events"][0] for spec in CASES[4:]} == {15277, 15104, 15099, 15319}
+    assert {spec["events"][0] for spec in CASES[4:8]} == {15277, 15104, 15099, 15319}
     assert not {spec["name"] for spec in CASES} & {spec["name"] for spec in entry + owned}
     # Reporting must not accept a provider failure or any hidden exchange mutation.
     for field in ("semantic_passed", "execution_passed"):
         report = {"semantic_passed": True, "execution_passed": True, field: False}
         with pytest.raises(AssertionError):
             assert_context_report(deepcopy(CASES[0]), report)
+
+
+def test_stress_repeats_change_only_name_not_evidence_owned_state_or_oracle():
+    conflict = next(spec for spec in OWNED_CASES if spec["events"] == [15284])
+    originals = [CASES[1], CASES[1], conflict, conflict]
+    assert [spec["events"][0] for spec in CASES[8:]] == [15184, 15184, 15284, 15284]
+    for repeated, original in zip(CASES[8:], originals, strict=True):
+        assert repeated["name"] != original["name"]
+        assert dict(repeated, name=original["name"]) == original
+        for key in ("events", "expected", "trades"):
+            assert repeated[key] is not original[key]
+
+
+@pytest.mark.parametrize("mutation", ["missing_trade", "extra_trade", "changed_protection", "changed_version"])
+def test_noop_acceptance_checks_every_owned_trade_completely(mutation):
+    spec = CASES[-1]
+    before = {"A": {"id": "a", "version": 2, "exits": {"sl": "a-sl"}},
+              "B": {"id": "b", "version": 2, "exits": {"sl": "b-sl"}}}
+    after = deepcopy(list(before.values()))
+    if mutation == "missing_trade":
+        after.pop()
+    elif mutation == "extra_trade":
+        after.append({"id": "c"})
+    elif mutation == "changed_protection":
+        after[1]["exits"]["sl"] = "different-stop"
+    else:
+        after[1]["version"] += 1
+    with pytest.raises(AssertionError, match="mutated owned trades"):
+        assert_context_report(spec, {"semantic_passed": True, "execution_passed": True,
+                                    "exchange_writes": [], "owned_before": before,
+                                    "owned_after": after})
