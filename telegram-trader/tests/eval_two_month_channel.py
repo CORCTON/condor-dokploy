@@ -36,7 +36,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 import eval_comprehensive_channel as comprehensive
-from aiohttp import web
+from aiohttp import web, web_app
 from comprehensive_cases import CASES
 from comprehensive_channel import SnapshotChannel
 from comprehensive_fixtures import FakeExchange
@@ -53,6 +53,21 @@ SEMANTICS = ("current-revision hypothetical first arrival; empty owned state; "
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def clear_closed_app_cache():
+    """Release disposable replay apps after shutdown, never in production.
+
+    aiohttp 3 caches middleware by handler/app and exposes no public eviction
+    option. Each cached handler retains a whole frozen channel prefix even after
+    AppRunner.cleanup(). This standalone evaluator owns its HTTP applications;
+    clear only their rebuildable cache between cases, preserving real middleware.
+    Versions without the cache need nothing; an incompatible cache API fails
+    visibly instead of silently retaining hundreds of closed applications.
+    """
+    cached = getattr(web_app, "_cached_build_middleware", None)
+    if cached is not None:
+        cached.cache_clear()
 
 
 def save(path, value):
@@ -227,8 +242,11 @@ async def scan_message(mid, interpreter, history, snapshot, owner):
     finally:
         report.update(seconds=round(time.monotonic() - started, 6), tools=channel.calls,
                       exchange_writes=exchange.writes, owned_after=store.trades())
-        await runner.cleanup()
-        store.close()
+        try:
+            await runner.cleanup()
+        finally:
+            store.close()
+            clear_closed_app_cache()
     return report
 
 
@@ -360,6 +378,8 @@ async def main(args, config):
                 except comprehensive.restart_errors(interpreter, planner) as exc:
                     save(path, exc.evaluation_report)
                     os._exit(70)
+                finally:
+                    clear_closed_app_cache()
                 report["scope"] = ("separate additional golden scenario; current-revision "
                                    "context, not an as-of historical replay")
                 report["future_edited_context_filtered"] = False
