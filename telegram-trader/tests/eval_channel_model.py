@@ -35,7 +35,11 @@ class Evidence:
             if (not before_message_id or i < before_message_id)
             and (not query or query in m["text"])
         ]
-        return {"messages": rows[:limit], "next_before_message_id": None, "context_only": True}
+        return {
+            "messages": rows[:limit],
+            "next_before_message_id": rows[limit - 1]["message_id"] if len(rows) > limit else None,
+            "context_only": True,
+        }
 
     async def image(self, message_id):
         self.calls.append(["image", message_id])

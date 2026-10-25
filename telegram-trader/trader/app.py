@@ -1,6 +1,7 @@
 import asyncio
 import fcntl
 import hmac
+import json
 import logging
 import os
 import time
@@ -92,7 +93,8 @@ def make_app(engine, channel=None, credentials=None):
                 "planner_seen": engine.store.get("planner_seen"),
                 "interpreter_seen": engine.store.get("interpreter_seen"),
                 "pending_messages": engine.store.db.execute(
-                    "SELECT COUNT(*) FROM events WHERE status IN ('queued','analyzing')"
+                    "SELECT COUNT(*) FROM events "
+                    "WHERE status IN ('queued','deferred','analyzing','processing')"
                 ).fetchone()[0],
                 "unknown_writes": len(engine.store.unknowns()),
                 "last_review": dict(last_review) if last_review else None,
@@ -182,6 +184,27 @@ def make_app(engine, channel=None, credentials=None):
 
     async def signal_result(request):
         body = await request.json()
+        job = engine.store.analysis(body["lease"])
+        if channel is not None and job and job["status"] == "analyzing":
+            channel.connected()
+            rows = [
+                engine.store.db.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
+                for event_id in json.loads(job["event_ids"])
+            ]
+            ids = list(dict.fromkeys(row["message"] for row in rows))
+            # Polling new message IDs cannot see an edited cancellation. Verify
+            # the claimed source versions immediately before applying a proposal.
+            async with channel.ingress_lock:
+                messages = await channel.client.get_messages(channel.peer, ids=ids)
+                for message_id, message in zip(ids, messages, strict=True):
+                    if message is None or not getattr(message, "date", None):
+                        for row in rows:
+                            if row["message"] == message_id:
+                                engine.store.finish(row["id"], "superseded", "source message deleted")
+                    else:
+                        receive_message(
+                            engine, job["channel"], message, time.time(), via="verification"
+                        )
         await inbox.apply(body["lease"], Decisions.model_validate(body["result"]))
         return web.json_response({"accepted": True})
 
@@ -245,6 +268,7 @@ def make_app(engine, channel=None, credentials=None):
 
 async def listen(engine, channel):
     from telethon import TelegramClient, events, utils
+    from telethon.errors import FloodWaitError
 
     while True:
         if missing_config():
@@ -269,23 +293,43 @@ async def listen(engine, channel):
             peer = await client.get_entity(os.getenv("TG_CHANNEL", "") or channel_id)
             if utils.get_peer_id(peer) != channel_id:
                 raise Review("Telegram channel ID does not match configured peer")
-            head = await client.get_messages(peer, limit=1)
-            cursor = head[0].id if head else 0
             channel.client, channel.peer = client, peer
             live_since = time.time()
+            ingress_lock = channel.ingress_lock
 
-            async def incoming(event, live_since=live_since, channel_id=channel_id):
-                receive_message(
-                    engine, channel_id, event.message, live_since,
+            async def incoming(
+                event, live_since=live_since, channel_id=channel_id,
+                client=client, peer=peer, ingress_lock=ingress_lock,
+            ):
+                await receive_current_message(
+                    client, peer, engine, channel_id, event.message, live_since, ingress_lock,
                     edited=isinstance(event, events.MessageEdited.Event),
                 )
 
             client.add_event_handler(incoming, events.NewMessage(chats=peer))
             client.add_event_handler(incoming, events.MessageEdited(chats=peer))
+            cursor_key = f"telegram_cursor:{channel_id}"
+            cursor = engine.store.get(cursor_key)
+            if cursor is None:
+                cursor = engine.store.db.execute(
+                    "SELECT MAX(message) FROM events WHERE channel=?", (channel_id,)
+                ).fetchone()[0]
+                if cursor is None:
+                    head = await client.get_messages(peer, limit=1)
+                    cursor = head[0].id if head else 0
+                engine.store.set(cursor_key, cursor)
+            await refresh_known_messages(
+                client, peer, engine, channel_id, live_since, ingress_lock
+            )
+            cursor = await collect_new_messages(
+                client, peer, cursor, engine, channel_id, live_since, ingress_lock
+            )
             engine.listener_ready = True
             log.info("Channel listener ready; push enabled; new-message reconciliation every 3s")
             tail = asyncio.create_task(
-                follow_new_messages(client, peer, cursor, engine, channel_id, live_since)
+                follow_new_messages(
+                    client, peer, cursor, engine, channel_id, live_since, ingress_lock
+                )
             )
             connection = asyncio.create_task(client.run_until_disconnected())
             try:
@@ -301,6 +345,8 @@ async def listen(engine, channel):
         except Exception as exc:  # noqa: BLE001 -- listener boundary must fail closed
             engine.pause("Telegram listener disconnected/not authorized")
             log.warning("Telegram listener: %s", type(exc).__name__)
+            if isinstance(exc, FloodWaitError):
+                await asyncio.sleep(exc.seconds)
         finally:
             engine.listener_ready = False
             channel.client, channel.peer = None, None
@@ -310,35 +356,99 @@ async def listen(engine, channel):
 
 def receive_message(engine, channel_id, message, live_since, *, edited=False, via="push"):
     source_time = message.date.timestamp()
-    if edited and message.edit_date:
-        source_time = message.edit_date.timestamp()
+    edited_at = message.edit_date.timestamp() if message.edit_date else None
+    edited = edited or edited_at is not None
     key = engine.store.event(
         channel_id, message.id, message.message or "", message.reply_to_msg_id,
-        source_time, live_since <= source_time and engine.listener_ready,
+        source_time, True,
         edited, media=describe_message(message)["media"],
+        edited_at=edited_at,
+        entry_eligible=live_since <= source_time,
     )
     if key:
         log.info("Channel message %s received; delivery_seconds=%.3f; edited=%s; via=%s",
-                 message.id, time.time() - source_time, edited, via)
+                 message.id, time.time() - (edited_at or source_time), edited, via)
 
 
-async def follow_new_messages(client, peer, cursor, engine, channel_id, live_since):
+async def receive_current_message(
+    client, peer, engine, channel_id, message, live_since, ingress_lock=None,
+    *, edited=False, via="push",
+):
+    # Telegram edit_date has only second precision. Re-read edits in a short
+    # serialized section so a late same-second push cannot overwrite newer text.
+    async with ingress_lock or asyncio.Lock():
+        message_id = message.id
+        if edited or message.edit_date:
+            message = await client.get_messages(peer, ids=message.id)
+        if message is not None and getattr(message, "date", None):
+            receive_message(engine, channel_id, message, live_since, edited=edited, via=via)
+        else:
+            with engine.store.db:
+                engine.store.db.execute(
+                    "UPDATE events SET status='superseded',detail='source message deleted' "
+                    "WHERE channel=? AND message=? "
+                    "AND status IN ('queued','deferred','analyzing','processing')",
+                    (channel_id, message_id),
+                )
+
+
+async def refresh_known_messages(client, peer, engine, channel_id, live_since, ingress_lock=None):
+    """Recover edits/deletions relevant to unfinished work and existing positions."""
+    active = [t["message"] for t in engine.active() if t["channel"] == channel_id]
+    ids = [
+        r[0] for r in engine.store.db.execute(
+            "SELECT DISTINCT message FROM events WHERE channel=? AND "
+            "(status IN ('queued','deferred','analyzing','processing') OR message>=?) "
+            "ORDER BY message", (channel_id, min(active) if active else 9223372036854775807),
+        ).fetchall()
+    ]
+    for offset in range(0, len(ids), 100):
+        batch = ids[offset:offset + 100]
+        messages = await client.get_messages(peer, ids=batch)
+        for message_id, message in zip(batch, messages, strict=True):
+            if message is None or not getattr(message, "date", None):
+                with engine.store.db:
+                    engine.store.db.execute(
+                        "UPDATE events SET status='superseded',detail='source message deleted' "
+                        "WHERE channel=? AND message=? "
+                        "AND status IN ('queued','deferred','analyzing','processing')",
+                        (channel_id, message_id),
+                    )
+                continue
+            await receive_current_message(
+                client, peer, engine, channel_id, message, live_since, ingress_lock, via="recovery"
+            )
+
+
+async def collect_new_messages(client, peer, cursor, engine, channel_id, live_since, ingress_lock=None):
+    async for message in client.iter_messages(
+        peer, min_id=cursor, reverse=True, limit=None, wait_time=3
+    ):
+        if getattr(message, "date", None) and getattr(message, "message", None) is not None:
+            await receive_current_message(
+                client, peer, engine, channel_id, message, live_since, ingress_lock, via="history"
+            )
+        cursor = max(cursor, message.id)
+        # Only an ordered history scan advances the durable cursor. A later push
+        # must not skip an earlier message that push delivery has not delivered yet.
+        engine.store.set(f"telegram_cursor:{channel_id}", cursor)
+    return cursor
+
+
+async def follow_new_messages(client, peer, cursor, engine, channel_id, live_since, ingress_lock=None):
     """Reconcile new posts if push delivery is delayed; both paths share durable deduplication.
 
-    The cursor starts at the connection's current head, never at historical signals.
-    Edits remain push events. Respect Telegram's flood wait rather than retrying it.
+    The durable cursor resumes after reconnect; recovered posts cannot open entries.
+    Respect Telegram's flood wait rather than retrying it.
     """
     from telethon.errors import FloodWaitError, RPCError
 
     while True:
         await asyncio.sleep(3)
         try:
-            async for message in client.iter_messages(
-                peer, min_id=cursor, reverse=True, limit=None, wait_time=3
-            ):
-                if getattr(message, "date", None) and getattr(message, "message", None) is not None:
-                    receive_message(engine, channel_id, message, live_since, via="history")
-                cursor = max(cursor, message.id)
+            cursor = await collect_new_messages(
+                client, peer, cursor, engine, channel_id, live_since, ingress_lock
+            )
         except FloodWaitError as exc:
             log.warning("Channel new-message check rate-limited; retry in %s seconds", exc.seconds)
             await asyncio.sleep(exc.seconds)

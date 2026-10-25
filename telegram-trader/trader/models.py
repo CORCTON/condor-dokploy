@@ -17,7 +17,7 @@ def decimal(value) -> Decimal:
 class Signal(BaseModel):
     model_config = ConfigDict(extra="forbid")
     action: Literal["open", "close", "cancel", "tp1", "tp2", "sl", "targets", "ignore", "review"]
-    symbol: str | None = Field(default=None, pattern=r"^[A-Z0-9]{2,20}$")
+    symbol: str | None = Field(default=None, pattern=r"^[A-Z0-9]{1,20}$")
     side: Literal["long", "short"] | None = None
     price: str | None = None
     target_trade_id: str | None = None
@@ -72,8 +72,12 @@ class Plan(BaseModel):
             raise ValueError("rationale required")
         return self
 
-    def validate_side(self, side: str, entry: Decimal):
-        if side == "long" and not self.sl < entry < self.tp1 < self.tp2:
+    def validate_side(self, side: str, entry: Decimal, *, validate_stop: bool = True):
+        if side == "long" and not (
+            entry < self.tp1 < self.tp2 and (not validate_stop or self.sl < entry)
+        ):
             raise ValueError("invalid long exit ordering")
-        if side == "short" and not self.sl > entry > self.tp1 > self.tp2:
+        if side == "short" and not (
+            entry > self.tp1 > self.tp2 and (not validate_stop or self.sl > entry)
+        ):
             raise ValueError("invalid short exit ordering")

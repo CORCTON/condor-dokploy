@@ -137,7 +137,9 @@ def test_receipt_uses_connection_boundary_not_message_age(delay, live):
         msg = message(101)
         msg.date = datetime.datetime.fromtimestamp(now - delay, datetime.UTC)
         receive_message(engine, 1, msg, now - 600)
-        assert json.loads(store.queued()[0]["payload"])["live"] is live
+        payload = json.loads(store.queued()[0]["payload"])
+        assert payload["live"] is True
+        assert payload["entry_eligible"] is live
         receive_message(engine, 1, msg, now - 600)  # push after tail is the same event
         assert len(store.queued()) == 1
     finally:

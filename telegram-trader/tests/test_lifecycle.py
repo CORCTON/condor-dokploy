@@ -86,6 +86,8 @@ async def test_full_lifecycle_over_http(tmp_path, monkeypatch, side, limit):
                 assert job["filled_contracts"] > 0 and job["candles_5m"]
                 body = {k: job[k] for k in ("trade_id", "version", "lease")}
                 body["plan"] = dict(values, tp1_fraction="0.5", rationale="synthetic test plan")
+                response = await client.post("/plans/proposals", headers=headers, json=body)
+                assert response.status == 200, await response.text()
                 response = await client.post("/plans", headers=headers, json=body)
                 assert response.status == 200, await response.text()
                 before = len(exchange.writes)

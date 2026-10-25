@@ -4,7 +4,7 @@ import json
 import time
 import uuid
 
-from .engine import Review
+from .engine import Reanalyze, Review
 from .models import Decisions
 
 
@@ -22,14 +22,22 @@ class SignalInbox:
         job = self.store.analysis(lease)
         return bool(
             job
+            and self.engine.listener_ready
             and job["status"] == "analyzing"
             and job["expires"] > time.time()
             and job["watermark"] == self.store.watermark(job["channel"])
             and job["trade_state"] == self.trade_state()
+            and all(
+                self.store.db.execute("SELECT status FROM events WHERE id=?", (event_id,))
+                .fetchone()[0] == "analyzing"
+                for event_id in json.loads(job["event_ids"])
+            )
         )
 
     async def claim(self):
         async with self.engine.lock:
+            if not self.engine.listener_ready:
+                return None
             for old in self.store.db.execute(
                 "SELECT id FROM analyses WHERE status='analyzing'"
             ).fetchall():
@@ -38,21 +46,38 @@ class SignalInbox:
                 self.store.release_analysis(old["id"])
             rows = self.store.queued()
             if not rows:
+                with self.store.db:
+                    self.store.db.execute("UPDATE events SET status='queued' WHERE status='deferred'")
+                rows = self.store.queued()
+            if not rows:
                 return None
             channel = rows[0]["channel"]
-            selected, images = [], 0
-            for row in rows:
-                if row["channel"] != channel:
-                    continue
-                media = json.loads(row["payload"]).get("media")
-                if len(selected) >= 50 or (media and images >= 4):
-                    break
-                selected.append(row)
-                images += bool(media)
-            rows = selected
+            rows = [row for row in rows if row["channel"] == channel][:50]
             lease = uuid.uuid4().hex
             ids = [r["id"] for r in rows]
             watermark = self.store.watermark(channel)
+            contextual = [
+                r for r in rows
+                if any(json.loads(r["payload"]).get(k) for k in ("backlog_deferred", "context_recovered"))
+            ]
+            context = []
+            if contextual:
+                earliest = min(r["message"] for r in contextual)
+                context = [
+                    {
+                        "message_id": r["message"],
+                        **json.loads(r["payload"]),
+                        "context_only": True,
+                    }
+                    for r in self.store.db.execute(
+                        "SELECT e.* FROM events e WHERE channel=? AND message>=? "
+                        "AND rowid<=? AND status<>'superseded' "
+                        "AND NOT EXISTS (SELECT 1 FROM events n WHERE n.channel=e.channel "
+                        "AND n.message=e.message AND n.rowid>e.rowid) ORDER BY received,rowid",
+                        (channel, earliest, watermark),
+                    ).fetchall()
+                    if r["id"] not in ids
+                ]
             with self.store.db:
                 self.store.db.execute(
                     "INSERT INTO analyses VALUES (?,?,?,?,?,'analyzing',?,NULL)",
@@ -82,6 +107,8 @@ class SignalInbox:
                 "trades": self.engine.active(),
                 "execution_enabled": self.engine.enabled,
                 "new_entries_paused": self.engine.paused(),
+                "context_events": context,
+                "deferred_after_message_ids": [r["message"] for r in contextual],
                 "more_queued": len([r for r in self.store.queued() if r["channel"] == channel]) > 0,
                 "output_schema": Decisions.model_json_schema(),
             }
@@ -97,6 +124,8 @@ class SignalInbox:
                 self.store.release_analysis(lease)
                 raise Review("stale signal analysis; read the new messages/state first")
             expected = self.validate(job, decisions)
+            if job["result"] != decisions.model_dump_json():
+                raise Review("execution must match the accepted proposal")
             with self.store.db:
                 self.store.db.execute(
                     "UPDATE analyses SET status='applying',result=? WHERE id=?",
@@ -107,8 +136,21 @@ class SignalInbox:
                 event = self.store.db.execute(
                     "SELECT * FROM events WHERE id=?", (event_id,)
                 ).fetchone()
+                if mapping[event_id].action == "open" and self.store.queued():
+                    payload = json.loads(event["payload"])
+                    payload["backlog_deferred"] = True
+                    with self.store.db:
+                        self.store.db.execute(
+                            "UPDATE events SET status='deferred',payload=? "
+                            "WHERE id=? AND status='analyzing'",
+                            (json.dumps(payload), event_id),
+                        )
+                    continue
                 try:
                     await self.engine.execute_decision(event, mapping[event_id], job["watermark"])
+                except Reanalyze:
+                    self.store.release_analysis(lease)
+                    return
                 except Exception:
                     self.engine.pause("unexpected model decision execution failure")
                     self.store.finish(
@@ -138,6 +180,9 @@ class SignalInbox:
             if not self.fresh(lease):
                 raise Review("stale analysis: no proposal accepted")
             self.validate(self.store.analysis(lease), decisions)
+            existing = self.store.analysis(lease)["result"]
+            if existing is not None and existing != decisions.model_dump_json():
+                raise Review("accepted proposal cannot be changed")
             with self.store.db:
                 self.store.db.execute(
                     "UPDATE analyses SET result=? WHERE id=?", (decisions.model_dump_json(), lease)

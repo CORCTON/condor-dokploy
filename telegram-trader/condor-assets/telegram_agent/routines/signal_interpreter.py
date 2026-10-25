@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-import signal
+import runpy
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +35,9 @@ actually needed to resolve the instruction. Never skip ambiguous context to be f
 When an instruction omits a symbol (e.g. 平掉/离场/撤掉), retrieve its reply/context.
 Do not simply choose the latest trade if several interpretations remain plausible.
 Evidence message IDs and a concrete reason are mandatory. Preserve channel numeric levels.
+Only the first four source images are attached automatically. Other images remain fully
+available through view_channel_image using on_demand_image_message_ids; inspect any image
+needed to decide its message. Lack of automatic attachment never means ignore that event.
 
 Interpret the ENTIRE batch in chronological context before deciding any action. A later
 cancellation/exit supersedes an unexecuted opening: ignore the superseded opening,
@@ -45,6 +48,11 @@ from context, not a fixed dictionary: 撤掉 may mean cancel an order or exit a 
 If ambiguous, review and explain the uncertainty. Management actions must cite the exact
 target_trade_id from the supplied state, never invent an ID or identify by symbol alone.
 Without an associated owned trade/order, an exit/cancel is normally ignore, not a new entry.
+If an explicit opening and its clearly associated SL/TP prices are in the SAME batch,
+put those prices in that opening's levels (sl/tp1/tp2), citing all contributing message IDs.
+Mark the absorbed price-update events ignore with that explanation: there is no owned
+trade ID yet. Do not invent a future ID or discard those prices. Conflicting/ambiguous
+updates require review. A later cancellation/exit still supersedes the unexecuted entry.
 
 Automatic channel following supports only EXPLICIT unconditional market/limit entries,
 close/cancel, established TP1/TP2 reductions, and explicit SL/TP price updates. Conditional
@@ -56,9 +64,18 @@ Multiple incompatible actions in one event or undefined partial allocations requ
 Image prices may support interpretation but never invent missing axes, scales or levels.
 
 Only claimed event IDs may cause actions. Historical tool results are context, never new
-trade commands. Mark historical/offline entries ignore. Edited opening messages must not
+trade commands. entry_eligible=false forbids a new entry, including restart recovery;
+it does NOT prohibit managing a currently owned position. For recovered messages, use
+the latest channel context and owned execution state to resolve superseding cancellations,
+replacements and already-completed actions; never mechanically replay an old exit/update.
+Mark historical/offline entries ignore. Edited opening messages must not
 reopen a trade; explicit cancellation or management edits can apply to an existing trade.
-If more_queued is true, choose review for any new opening until the backlog is resolved.
+If more_queued is true, still classify the intended action: the executor defers openings
+until the backlog is analyzed. When backlog_deferred=true, read events AND context_events
+before deciding again, checking later cancellations/exits or replacements after that message
+ID (also listed in deferred_after_message_ids), not only the re-claimed opening text.
+Use history/image tools if more context is needed. context_events are full later messages
+already received at this snapshot, marked context_only; they never authorize new actions.
 Margin budget 20% of total futures equity, isolated 7x, is enforced by the executor.
 For open set base symbol, side, and price=null for market or an explicit limit price.
 No initial stop is required; the operator permits a gap before exit planning.
@@ -114,12 +131,17 @@ async def generate_decisions(job, owner, session):
             }
         ],
     )
-    images, image_messages, unavailable = [], [], []
+    images, image_messages, unavailable, on_demand = [], [], [], []
+    automatic_images = 0
     for event in job["events"]:
         media = event.get("media")
         if not media:
             continue
         message_id = event["message_id"]
+        if automatic_images >= 4:
+            on_demand.append(message_id)
+            continue
+        automatic_images += 1
         try:
             headers = {"Authorization": "Bearer " + os.environ["TRADER_TOKEN"]}
             async with session.get(
@@ -144,6 +166,7 @@ async def generate_decisions(job, owner, session):
             **job,
             "attached_images_in_order": image_messages,
             "unavailable_image_message_ids": unavailable,
+            "on_demand_image_message_ids": on_demand,
         },
         ensure_ascii=False,
     )
@@ -228,32 +251,8 @@ async def run_worker():
 async def run(config: Config, context):
     # Condor serializes clients with the same base URL within one process. Keep
     # channel interpretation independent of exit planning and interactive chats.
-    while True:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-u",
-            "-c",
-            "import runpy,sys; runpy.run_path(sys.argv[1], run_name='__main__')",
-            str(Path(__file__).resolve()),
-            start_new_session=True,
-        )
-        try:
-            code = await process.wait()
-            log.warning("Channel interpretation worker exited: %s", code)
-        finally:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(process.wait(), 5)
-            except TimeoutError:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-        await asyncio.sleep(5)
+    worker = runpy.run_path(str(Path(__file__).resolve().parents[1] / "worker.py"))
+    await worker["run_isolated"](__file__)
 
 
 if __name__ == "__main__":

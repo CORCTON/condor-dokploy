@@ -32,6 +32,7 @@ class ChannelReader:
     def __init__(self):
         self.client, self.peer = None, None
         self.image_lock = asyncio.Lock()
+        self.ingress_lock = asyncio.Lock()
 
     def connected(self):
         if self.client is None or self.peer is None:

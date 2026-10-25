@@ -267,6 +267,7 @@ async def test_partial_fill_is_not_ack_size(rig):
     trade = await signal(rig)
     assert trade["lots"] == 14 and trade["filled"] == 7
     job = await rig[2].claim_plan()
+    await rig[2].propose_plan(job["trade_id"], job["version"], job["lease"], plan())
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     trade = rig[0].trade(trade["id"])
     assert trade["exits"]["tp1"]["size"] == 3
@@ -309,6 +310,7 @@ async def test_restart_reuses_durable_intents(rig):
 async def test_plan_native_reduce_only_and_replay_rejected(rig):
     await signal(rig)
     job = await rig[2].claim_plan()
+    await rig[2].propose_plan(job["trade_id"], job["version"], job["lease"], plan())
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     stops = list(rig[1].stops.values())
     assert stops[0]["initial"]["close"] and stops[0]["initial"]["reduce_only"]
@@ -450,6 +452,7 @@ async def test_close_partial_ioc_retries_only_after_terminal(rig):
 async def test_tp_partial_ioc_completes_without_over_reduction(rig):
     await signal(rig)
     job = await rig[2].claim_plan()
+    await rig[2].propose_plan(job["trade_id"], job["version"], job["lease"], plan())
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     rig[1].partial = 5
     await signal(rig, "INJ 当前价格做TP1", message=2)
@@ -464,6 +467,7 @@ async def test_channel_tp_levels_override_plan_and_amend_orders(rig):
     await signal(rig)
     await signal(rig, "INJ TP1: 9.50 TP2: 8.50 SL: 10.50", message=2)
     job = await rig[2].claim_plan()
+    await rig[2].propose_plan(job["trade_id"], job["version"], job["lease"], plan())
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     assert rig[1].orders["2"]["price"] == "9.50"
     assert rig[1].orders["3"]["price"] == "8.50"
@@ -478,6 +482,7 @@ async def test_later_limit_fills_resize_exits(rig):
     rig[1].position["size"] = -10
     await rig[2].poll()
     job = await rig[2].claim_plan()
+    await rig[2].propose_plan(job["trade_id"], job["version"], job["lease"], plan())
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     entry["left"] = 0
     entry["status"] = "finished"
@@ -512,6 +517,7 @@ async def test_stop_trigger_closes_residual_position(rig):
 async def test_no_model_call_can_change_leverage(rig):
     await signal(rig)
     job = await rig[2].claim_plan()
+    await rig[2].propose_plan(job["trade_id"], job["version"], job["lease"], plan())
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     assert [p for m, p, _, _ in rig[1].writes if p.endswith("/set_leverage")] == [
         "/positions/INJ_USDT/set_leverage"
@@ -623,6 +629,7 @@ async def test_delayed_trade_management_is_not_blocked_by_entry_age_limit(rig, a
     )
     if action != "cancel":
         job = await engine.claim_plan()
+        await engine.propose_plan(job["trade_id"], job["version"], job["lease"], plan())
         await engine.apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     writes_before = len(exchange.writes)
     key = store.event(-100123, 2, "management", 1, time.time() - 120, True)
@@ -683,6 +690,7 @@ async def test_native_stop_complete_lifecycle(rig, side):
         if side == "long"
         else plan()
     )
+    await rig[2].propose_plan(job["trade_id"], job["version"], job["lease"], exit_plan)
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], exit_plan)
     rig[1].stops["100"].update(status="finished", finish_as="succeeded")
     rig[1].position["size"] = 3 if side == "long" else -3

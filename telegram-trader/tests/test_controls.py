@@ -177,6 +177,7 @@ async def test_pause_keeps_owned_exit_management_working(controlled):
     trade = await signal(controlled)
     engine.pause("operator requested pause")
     job = await engine.claim_plan()
+    await engine.propose_plan(trade["id"], job["version"], job["lease"], plan())
     await engine.apply_plan(trade["id"], job["version"], job["lease"], plan())
     assert exchange.stops
     await signal(controlled, "INJ 全部平仓", message=2)

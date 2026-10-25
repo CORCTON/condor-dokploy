@@ -36,9 +36,14 @@ class Store:
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, json.dumps(value)))
 
-    def event(self, channel, message, text, reply, source_time, live, edited=False, media=None):
+    def event(
+        self, channel, message, text, reply, source_time, live, edited=False, media=None,
+        *, edited_at=None, entry_eligible=None,
+    ):
+        edited = edited or edited_at is not None
+        version = (edited_at or source_time, edited)
         revision = hashlib.sha256(
-            json.dumps([text, reply, media], sort_keys=True).encode()
+            json.dumps([text, reply, media, edited_at], sort_keys=True).encode()
         ).hexdigest()[:16]
         key = f"{channel}:{message}:{revision}"
         payload = {
@@ -47,19 +52,52 @@ class Store:
             "source_time": source_time,
             "live": live,
             "edited": edited,
+            "edited_at": edited_at,
+            "entry_eligible": live if entry_eligible is None else entry_eligible,
+            "context_recovered": live and entry_eligible is False,
             "media": media,
         }
         with self.db:
+            previous = self.db.execute(
+                "SELECT rowid,payload FROM events WHERE channel=? AND message=? "
+                "ORDER BY rowid DESC LIMIT 1", (channel, message),
+            ).fetchone()
+            if previous:
+                old = json.loads(previous["payload"])
+                old_version = (
+                    old.get("edited_at") or old["source_time"], bool(old.get("edited"))
+                )
+                if version < old_version:
+                    return None
+                if (
+                    version == old_version
+                    and all(old.get(k) == payload.get(k) for k in ("text", "reply", "media"))
+                ):
+                    return None
+                if self.db.execute("SELECT 1 FROM events WHERE id=?", (key,)).fetchone():
+                    # Same-second A -> B -> A is a distinct authoritative edit,
+                    # not a duplicate delivery of the first A occurrence.
+                    revision = hashlib.sha256(
+                        json.dumps([key, previous["rowid"]]).encode()
+                    ).hexdigest()[:16]
+                    key = f"{channel}:{message}:{revision}"
             cursor = self.db.execute(
                 "INSERT OR IGNORE INTO events VALUES (?,?,?,?,?,?,?,?)",
                 (key, channel, message, revision, time.time(), json.dumps(payload), "queued", ""),
             )
+            if cursor.rowcount:
+                self.db.execute(
+                    "UPDATE events SET status='superseded' WHERE channel=? AND message=? "
+                    "AND id<>? AND status IN ('queued','deferred','analyzing','processing')",
+                    (channel, message, key),
+                )
         return key if cursor.rowcount else None
 
     def finish(self, key, status, detail=""):
         with self.db:
             self.db.execute(
-                "UPDATE events SET status=?, detail=? WHERE id=?", (status, detail, key)
+                "UPDATE events SET status=?, detail=? WHERE id=? AND status<>'superseded'",
+                (status, detail, key),
             )
 
     def queued(self):
@@ -89,14 +127,15 @@ class Store:
                 )
 
     def recover_analysis(self):
-        # A restart never grants permission to replay an old entry. Still let the
-        # model interpret every unprocessed message, now marked context-only.
+        # Recover management instructions, but never authorize a pre-restart entry.
         with self.db:
             for row in self.db.execute(
-                "SELECT id,payload FROM events WHERE status IN ('queued','analyzing','processing')"
+                "SELECT id,payload FROM events "
+                "WHERE status IN ('queued','deferred','analyzing','processing')"
             ).fetchall():
                 payload = json.loads(row["payload"])
-                payload["live"] = False
+                payload["entry_eligible"] = False
+                payload["context_recovered"] = True
                 self.db.execute(
                     "UPDATE events SET status='queued',payload=? WHERE id=?",
                     (json.dumps(payload), row["id"]),

@@ -59,6 +59,7 @@ async def test_typed_proposal_tool_rejects_bad_fields_without_exchange_writes(mo
     monkeypatch.setenv("TRADER_TOKEN", "mcp-fixture-only")
     store = Store(":memory:")
     engine = Engine(store, None)
+    engine.listener_ready = True
     inbox = SignalInbox(engine)
     event_id = store.event(1, 1, "早上好", None, time.time(), True)
     job = await inbox.claim()
