@@ -69,6 +69,22 @@ class Engine:
         self.lock = asyncio.Lock()
         self.listener_ready = False
         self.pause_revision = 0
+        self.last_channel_scan = None
+        self.last_reconcile = None
+        self._worker_heartbeats = {}
+
+    def record_heartbeat(self, name):
+        if name not in {"interpreter", "planner"}:
+            raise ValueError("unknown worker")
+        self._worker_heartbeats[name] = (time.time(), time.monotonic())
+
+    def worker_seen(self, name):
+        heartbeat = self._worker_heartbeats.get(name)
+        return heartbeat[0] if heartbeat else None
+
+    def worker_age(self, name):
+        heartbeat = self._worker_heartbeats.get(name)
+        return time.monotonic() - heartbeat[1] if heartbeat else None
 
     def paused(self):
         return self.store.get("paused", True) or bool(self.store.unknowns())
@@ -91,10 +107,9 @@ class Engine:
                     raise Review("存在结果未确认的订单，未开启跟单；请先核对订单结果。")
                 if any(t.get("last_error") for t in self.active()):
                     raise Review("已有仓位需要人工核查，未开启跟单；请先查看执行状态。")
-                if any(
-                    time.time() - self.store.get(name, 0) > 180
-                    for name in ("interpreter_seen", "planner_seen")
-                ):
+                if any(age is None or age > 180 for age in (
+                    self.worker_age("interpreter"), self.worker_age("planner")
+                )):
                     raise Review("信号分析或止盈止损规划未就绪，未开启跟单；请检查 Routine。")
                 if revision != self.pause_revision:
                     raise Review("检查期间收到暂停指令，保持暂停；如需开启，请重新发送开始。")
@@ -1058,10 +1073,13 @@ class Engine:
         async with self.lock:
             await self.reconcile_unknowns()
         for snapshot in self.active():
-            if self.store.queued():
-                break  # prioritize channel events between position reconciliations
+            # Model backlog must not suspend existing-position protection. Yield
+            # between positions so ready channel operations can acquire the lock.
+            await asyncio.sleep(0)
             async with self.lock:
                 trade = self.store.trade(snapshot["id"])
+                if not trade or trade["status"] in {"closed", "rejected", "deferred_entry"}:
+                    continue
                 try:
                     self.recover_exits(trade)
                     await self.refresh(trade)

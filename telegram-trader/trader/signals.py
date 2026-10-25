@@ -15,7 +15,8 @@ class SignalInbox:
     def trade_state(self):
         fields = ("id", "version", "status", "filled", "position_size", "entry_terminal")
         return json.dumps(
-            [{k: t.get(k) for k in fields} for t in self.engine.active()], sort_keys=True
+            [{k: t.get(k) for k in fields} for t in sorted(self.engine.active(), key=lambda t: t["id"])],
+            sort_keys=True,
         )
 
     def fresh(self, lease):

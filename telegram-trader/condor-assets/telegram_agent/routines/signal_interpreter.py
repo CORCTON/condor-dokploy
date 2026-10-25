@@ -240,7 +240,8 @@ async def interpret_current(job, owner, session):
 
 async def run_worker():
     owner = int(os.environ["ADMIN_USER_ID"])
-    async with aiohttp.ClientSession() as session:
+    async with (aiohttp.ClientSession() as session,
+                runtime["worker_heartbeat"](session, "interpreter")):
         while True:
             job = None
             try:

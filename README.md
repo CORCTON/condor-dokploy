@@ -151,6 +151,30 @@ Restart preserves operator pause state.
 Telegram collection and interpretation can run with exchange execution disabled;
 they do not require exchange keys. New decisions remain non-executable while disabled.
 
+### Runtime health and retention
+
+`/health` is process liveness. The authenticated `/ready` endpoint checks configured
+credentials, the listener, successful channel reconciliation, position reconciliation,
+and both model-worker heartbeats. Docker probes use `/ready`; Condor also checks its
+own HTTP server. A manual entry pause is not a health failure. A disabled deployment
+reports `disabled` explicitly, not trading readiness. These checks are read-only and
+do not probe the model or place orders; healthy workers do not guarantee provider or
+exchange availability on the next request. Docker health status alone does not restart
+an unhealthy container.
+
+Worker heartbeats use process-local monotonic age and are sent independently of long
+model turns. They are not SQLite writes and are not restored from an earlier process.
+Execution intents, operator controls and channel cursors remain durable with SQLite
+WAL and `synchronous=FULL`. Position maintenance yields between positions, but queued
+channel analysis cannot starve it. Telegram read/ingress-lock waits have a 15-second
+server deadline; this deadline never cancels an exchange write.
+
+All Compose services cap Docker stdout/stderr logs at three 10 MiB files per container.
+This does not cover application files in mounted volumes. New log settings require
+container recreation; apply them selectively with existing images, preserve state and
+operator controls, and verify readiness after each dependency restart. Do not truncate
+Docker's live log files or recreate the entire stack just to rotate logs.
+
 ### Telegram start / pause
 
 Tell the bound TelegramAgent **开始跟单 / 恢复跟单**, **暂停跟单 / 关闭跟单**, or

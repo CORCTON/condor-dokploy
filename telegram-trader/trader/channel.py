@@ -6,6 +6,7 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 # Evidence clients allow 20 seconds total; leave time to return a retryable error.
 IMAGE_TIMEOUT_SECONDS = 15
+READ_TIMEOUT_SECONDS = 15
 
 
 def describe_message(message):
@@ -44,7 +45,8 @@ class ChannelReader:
         self.connected()
         if message_id <= 0:
             raise ValueError("positive message ID required")
-        message = await self.client.get_messages(self.peer, ids=message_id)
+        async with asyncio.timeout(READ_TIMEOUT_SECONDS):
+            message = await self.client.get_messages(self.peer, ids=message_id)
         if message is None or not getattr(message, "date", None):
             raise ValueError("channel message deleted or unavailable")
         return message
@@ -56,13 +58,14 @@ class ChannelReader:
         self.connected()
         if before_message_id < 0 or not 1 <= limit <= 50 or len(query) > 200:
             raise ValueError("invalid history query")
-        messages = [
-            describe_message(m)
-            async for m in self.client.iter_messages(
-                self.peer, limit=limit, offset_id=before_message_id, search=query or None
-            )
-            if getattr(m, "date", None)
-        ]
+        async with asyncio.timeout(READ_TIMEOUT_SECONDS):
+            messages = [
+                describe_message(m)
+                async for m in self.client.iter_messages(
+                    self.peer, limit=limit, offset_id=before_message_id, search=query or None
+                )
+                if getattr(m, "date", None)
+            ]
         return {
             "messages": messages,
             "next_before_message_id": messages[-1]["message_id"]

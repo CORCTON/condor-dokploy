@@ -1,5 +1,12 @@
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   cpa:
+    logging: *bounded-logging
     image: eceasy/cli-proxy-api:v8.0.38
     restart: unless-stopped
     command: ["./CLIProxyAPI", "--config", "/config/config.yaml"]
@@ -32,6 +39,7 @@ services:
       - condor-internal
 
   broker-init:
+    logging: *bounded-logging
     image: alpine:3.22
     restart: "no"
     environment:
@@ -52,6 +60,7 @@ services:
       - condor-emqx-bootstrap:/bootstrap
 
   postgres:
+    logging: *bounded-logging
     image: postgres:16
     restart: unless-stopped
     environment:
@@ -70,6 +79,7 @@ services:
       - condor-internal
 
   emqx:
+    logging: *bounded-logging
     image: emqx:5
     restart: unless-stopped
     depends_on:
@@ -105,6 +115,7 @@ services:
           - node1.emqx.local
 
   hummingbot-init:
+    logging: *bounded-logging
     build:
       context: https://github.com/CORCTON/condor-dokploy.git#main
       target: hummingbot-init
@@ -113,6 +124,7 @@ services:
       - /var/lib/condor-spot/bots:/seed-target
 
   hummingbot-api:
+    logging: *bounded-logging
     image: hummingbot/hummingbot-api:latest
     restart: unless-stopped
     depends_on:
@@ -156,6 +168,7 @@ services:
       - condor-internal
 
   condor:
+    logging: *bounded-logging
     restart: unless-stopped
     build:
       context: https://github.com/CORCTON/condor-dokploy.git#main
@@ -205,7 +218,7 @@ services:
         - CMD
         - python
         - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:443/', timeout=5)
+        - import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:443/',timeout=3); r=urllib.request.Request(os.environ['TELEGRAM_TRADER_URL']+'/ready',headers={'Authorization':'Bearer '+os.environ['TRADER_TOKEN']}); urllib.request.urlopen(r,timeout=3)
       interval: 30s
       timeout: 10s
       start_period: 120s
@@ -215,6 +228,7 @@ services:
       - dokploy-network
 
   telegram-trader-assets:
+    logging: *bounded-logging
     image: corcton/telegram-trader:local
     restart: "no"
     command: ["python", "/bundle/install_assets.py"]
@@ -226,6 +240,7 @@ services:
     network_mode: none
 
   telegram-trader:
+    logging: *bounded-logging
     image: corcton/telegram-trader:local
     build:
       context: https://github.com/CORCTON/condor-dokploy.git#main
@@ -261,9 +276,10 @@ services:
     networks:
       - condor-internal
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3)"]
+      test: ["CMD", "python", "-c", "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8080/ready',headers={'Authorization':'Bearer '+os.environ['TRADER_TOKEN']}); urllib.request.urlopen(r,timeout=3)"]
       interval: 15s
       timeout: 5s
+      start_period: 120s
       retries: 3
 
 volumes:

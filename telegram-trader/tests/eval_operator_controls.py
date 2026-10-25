@@ -121,8 +121,8 @@ async def main():
                 os.environ[name] = "fixture"
             for prompt, expected, paused in cases:
                 calls.clear()
-                for name in ("planner_seen", "interpreter_seen"):
-                    store.set(name, time.time())
+                for name in ("planner", "interpreter"):
+                    engine.record_heartbeat(name)
                 client = build_llm_client(
                     os.environ["CONDOR_DEFAULT_AGENT"],
                     user_id=int(os.environ["ADMIN_USER_ID"]),

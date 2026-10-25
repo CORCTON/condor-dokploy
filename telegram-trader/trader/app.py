@@ -3,6 +3,7 @@ import fcntl
 import hmac
 import json
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
-from .channel import ChannelReader, describe_message
+from .channel import READ_TIMEOUT_SECONDS, ChannelReader, describe_message
 from .credentials import load_credentials
 from .engine import Engine, Review
 from .gate import Gate, GateError
@@ -34,6 +35,44 @@ def missing_config(credentials=None):
     if credentials is not None and not credentials.ready:
         missing.append(credentials.error)
     return missing
+
+
+def business_readiness(engine, credentials=None):
+    """Observe local progress without taking the execution lock or probing upstreams."""
+    now = time.monotonic()
+    ages = {
+        "interpreter": engine.worker_age("interpreter"),
+        "planner": engine.worker_age("planner"),
+        "channel_scan": None if engine.last_channel_scan is None else now - engine.last_channel_scan,
+        "reconcile": None if engine.last_reconcile is None else now - engine.last_reconcile,
+    }
+    ages = {
+        name: max(0, value) if value is not None and math.isfinite(value) else None
+        for name, value in ages.items()
+    }
+    limits = {"interpreter": 60, "planner": 60, "channel_scan": 60, "reconcile": 180}
+    reasons = []
+    if engine.enabled:
+        if missing_config(credentials) or not engine.gate.ready:
+            reasons.append("configuration_missing")
+        if not engine.listener_ready:
+            reasons.append("listener_disconnected")
+        for name, age in ages.items():
+            if age is None or age > limits[name]:
+                reasons.append(name + "_stale")
+        if engine.store.unknowns():
+            reasons.append("exchange_write_unconfirmed")
+        if any(trade.get("last_error") for trade in engine.active()):
+            reasons.append("position_requires_review")
+    return {
+        "ready": not reasons,
+        "state": "disabled" if not engine.enabled else ("degraded" if reasons else "ready"),
+        "enabled": engine.enabled,
+        "paused": engine.paused(),
+        "reasons": reasons,
+        "ages_seconds": ages,
+        "limits_seconds": limits,
+    }
 
 
 @web.middleware
@@ -69,6 +108,10 @@ def make_app(engine, channel=None, credentials=None):
             }
         )
 
+    async def ready(request):
+        result = business_readiness(engine, credentials)
+        return web.json_response(result, status=200 if result["ready"] else 503)
+
     async def status(request):
         last_review = engine.store.db.execute(
             "SELECT message AS message_id,received AS received_at,detail AS reason "
@@ -90,8 +133,9 @@ def make_app(engine, channel=None, credentials=None):
                 "listener_ready": engine.listener_ready,
                 "missing": missing_config(credentials),
                 "credentials": credentials.status() if credentials else None,
-                "planner_seen": engine.store.get("planner_seen"),
-                "interpreter_seen": engine.store.get("interpreter_seen"),
+                "readiness": business_readiness(engine, credentials),
+                "planner_seen": engine.worker_seen("planner"),
+                "interpreter_seen": engine.worker_seen("interpreter"),
                 "pending_messages": engine.store.db.execute(
                     "SELECT COUNT(*) FROM events "
                     "WHERE status IN ('queued','deferred','analyzing','processing')"
@@ -135,8 +179,15 @@ def make_app(engine, channel=None, credentials=None):
         return await status(request)
 
     async def jobs(request):
-        engine.store.set("planner_seen", time.time())
+        engine.record_heartbeat("planner")
         return web.json_response(await engine.claim_plan() if engine.enabled else None)
+
+    async def worker_heartbeat(request):
+        worker = request.match_info["worker"]
+        if worker not in {"interpreter", "planner"}:
+            raise web.HTTPBadRequest(text="unknown worker")
+        engine.record_heartbeat(worker)
+        return web.json_response({"recorded": True})
 
     async def plan(request):
         body = await request.json()
@@ -170,7 +221,7 @@ def make_app(engine, channel=None, credentials=None):
         )
 
     async def signal_jobs(request):
-        engine.store.set("interpreter_seen", time.time())
+        engine.record_heartbeat("interpreter")
         return web.json_response(await inbox.claim())
 
     async def signal_fresh(request):
@@ -188,17 +239,26 @@ def make_app(engine, channel=None, credentials=None):
             ids = list(dict.fromkeys(row["message"] for row in rows))
             # Polling new message IDs cannot see an edited cancellation. Verify
             # the claimed source versions immediately before applying a proposal.
-            async with channel.ingress_lock:
-                messages = await channel.client.get_messages(channel.peer, ids=ids)
-                for message_id, message in zip(ids, messages, strict=True):
-                    if message is None or not getattr(message, "date", None):
-                        for row in rows:
-                            if row["message"] == message_id:
-                                engine.store.finish(row["id"], "superseded", "source message deleted")
-                    else:
-                        receive_message(
-                            engine, job["channel"], message, time.time(), via="verification"
-                        )
+            try:
+                async with asyncio.timeout(READ_TIMEOUT_SECONDS), channel.ingress_lock:
+                    messages = await channel.client.get_messages(channel.peer, ids=ids)
+                    for message_id, message in zip(ids, messages, strict=True):
+                        if message is None or not getattr(message, "date", None):
+                            for row in rows:
+                                if row["message"] == message_id:
+                                    engine.store.finish(
+                                        row["id"], "superseded", "source message deleted"
+                                    )
+                        else:
+                            receive_message(
+                                engine, job["channel"], message, time.time(), via="verification"
+                            )
+            except TimeoutError as exc:
+                raise web.HTTPServiceUnavailable(
+                    text="channel source verification temporarily unavailable"
+                ) from exc
+        # Only the read-only source verification is cancellable by our deadline.
+        # Once execution starts, preserve the durable exchange-write protocol.
         await inbox.apply(body["lease"], Decisions.model_validate(body["result"]))
         return web.json_response({"accepted": True})
 
@@ -218,18 +278,24 @@ def make_app(engine, channel=None, credentials=None):
     async def history(request):
         if channel is None:
             raise web.HTTPServiceUnavailable(text="channel reader unavailable")
-        return web.json_response(
-            await channel.history(
-                before_message_id=int(request.query.get("before_message_id", 0)),
-                limit=int(request.query.get("limit", 30)),
-                query=request.query.get("query", ""),
+        try:
+            return web.json_response(
+                await channel.history(
+                    before_message_id=int(request.query.get("before_message_id", 0)),
+                    limit=int(request.query.get("limit", 30)),
+                    query=request.query.get("query", ""),
+                )
             )
-        )
+        except TimeoutError as exc:
+            raise web.HTTPServiceUnavailable(text="channel history temporarily unavailable") from exc
 
     async def message(request):
         if channel is None:
             raise web.HTTPServiceUnavailable(text="channel reader unavailable")
-        return web.json_response(await channel.read(int(request.match_info["message_id"])))
+        try:
+            return web.json_response(await channel.read(int(request.match_info["message_id"])))
+        except TimeoutError as exc:
+            raise web.HTTPServiceUnavailable(text="channel message temporarily unavailable") from exc
 
     async def image(request):
         if channel is None:
@@ -241,10 +307,12 @@ def make_app(engine, channel=None, credentials=None):
         return web.Response(body=data, content_type=mime, headers={"Cache-Control": "no-store"})
 
     app.router.add_get("/health", health)
+    app.router.add_get("/ready", ready)
     app.router.add_get("/status", status)
     app.router.add_post("/pause", pause)
     app.router.add_post("/start", start)
     app.router.add_post("/jobs/claim", jobs)
+    app.router.add_post("/workers/{worker}/heartbeat", worker_heartbeat)
     app.router.add_post("/plans", plan)
     app.router.add_post("/plans/proposals", plan_propose)
     app.router.add_get("/plans/{trade_id}/proposal", plan_proposal)
@@ -298,8 +366,8 @@ async def listen(engine, channel):
                 event, live_since=live_since, channel_id=channel_id,
                 client=client, peer=peer, ingress_lock=ingress_lock,
             ):
-                await receive_current_message(
-                    client, peer, engine, channel_id, event.message, live_since, ingress_lock,
+                await receive_live_message(
+                    channel, client, peer, engine, channel_id, event.message, live_since, ingress_lock,
                     edited=isinstance(event, events.MessageEdited.Event),
                 )
 
@@ -312,7 +380,8 @@ async def listen(engine, channel):
                     "SELECT MAX(message) FROM events WHERE channel=?", (channel_id,)
                 ).fetchone()[0]
                 if cursor is None:
-                    head = await client.get_messages(peer, limit=1)
+                    async with asyncio.timeout(READ_TIMEOUT_SECONDS):
+                        head = await client.get_messages(peer, limit=1)
                     cursor = head[0].id if head else 0
                 engine.store.set(cursor_key, cursor)
             await refresh_known_messages(
@@ -373,7 +442,7 @@ async def receive_current_message(
 ):
     # Telegram edit_date has only second precision. Re-read edits in a short
     # serialized section so a late same-second push cannot overwrite newer text.
-    async with ingress_lock or asyncio.Lock():
+    async with asyncio.timeout(READ_TIMEOUT_SECONDS), ingress_lock or asyncio.Lock():
         message_id = message.id
         if edited or message.edit_date:
             message = await client.get_messages(peer, ids=message.id)
@@ -389,6 +458,27 @@ async def receive_current_message(
                 )
 
 
+async def receive_live_message(
+    channel, client, peer, engine, channel_id, message, live_since, ingress_lock, *, edited=False,
+):
+    """Retry read-only push ingestion; older edits are not covered by the new-ID cursor."""
+    from telethon.errors import FloodWaitError, RPCError
+
+    while channel.client is client:
+        try:
+            await receive_current_message(
+                client, peer, engine, channel_id, message, live_since, ingress_lock, edited=edited
+            )
+            return
+        except FloodWaitError as exc:
+            log.warning("Channel push read rate-limited; retry in %s seconds", exc.seconds)
+            await asyncio.sleep(exc.seconds)
+        except (RPCError, OSError, TimeoutError) as exc:
+            log.warning("Channel push read failed: %s; retrying read-only ingestion",
+                        type(exc).__name__)
+            await asyncio.sleep(3)
+
+
 async def refresh_known_messages(client, peer, engine, channel_id, live_since, ingress_lock=None):
     """Recover edits/deletions relevant to unfinished work and existing positions."""
     active = [t["message"] for t in engine.active() if t["channel"] == channel_id]
@@ -401,7 +491,8 @@ async def refresh_known_messages(client, peer, engine, channel_id, live_since, i
     ]
     for offset in range(0, len(ids), 100):
         batch = ids[offset:offset + 100]
-        messages = await client.get_messages(peer, ids=batch)
+        async with asyncio.timeout(READ_TIMEOUT_SECONDS):
+            messages = await client.get_messages(peer, ids=batch)
         for message_id, message in zip(batch, messages, strict=True):
             if message is None or not getattr(message, "date", None):
                 with engine.store.db:
@@ -418,17 +509,25 @@ async def refresh_known_messages(client, peer, engine, channel_id, live_since, i
 
 
 async def collect_new_messages(client, peer, cursor, engine, channel_id, live_since, ingress_lock=None):
-    async for message in client.iter_messages(
-        peer, min_id=cursor, reverse=True, limit=None, wait_time=3
-    ):
-        if getattr(message, "date", None) and getattr(message, "message", None) is not None:
-            await receive_current_message(
-                client, peer, engine, channel_id, message, live_since, ingress_lock, via="history"
-            )
-        cursor = max(cursor, message.id)
-        # Only an ordered history scan advances the durable cursor. A later push
-        # must not skip an earlier message that push delivery has not delivered yet.
-        engine.store.set(f"telegram_cursor:{channel_id}", cursor)
+    cursor_key = f"telegram_cursor:{channel_id}"
+    # A previous scan may have persisted a prefix before timing out. Resume that
+    # prefix, rather than repeatedly spending the whole deadline on the same IDs.
+    cursor = max(cursor, engine.store.get(cursor_key, cursor))
+    async with asyncio.timeout(READ_TIMEOUT_SECONDS):
+        async for message in client.iter_messages(
+            peer, min_id=cursor, reverse=True, limit=None, wait_time=3
+        ):
+            if getattr(message, "date", None) and getattr(message, "message", None) is not None:
+                await receive_current_message(
+                    client, peer, engine, channel_id, message, live_since, ingress_lock, via="history"
+                )
+            cursor = max(cursor, message.id)
+            # Only an ordered history scan advances the durable cursor. A later push
+            # must not skip an earlier message that push delivery has not delivered yet.
+            engine.store.set(cursor_key, cursor)
+    # Even an empty scan proves that the durable cursor was checked against the
+    # channel tail. Partial progress/timeouts must not count as a complete scan.
+    engine.last_channel_scan = time.monotonic()
     return cursor
 
 
@@ -460,6 +559,7 @@ async def reconcile(engine):
         if engine.gate.ready:
             try:
                 await engine.poll()
+                engine.last_reconcile = time.monotonic()
             except Exception as exc:  # noqa: BLE001 -- pause new risk on any reconciliation failure
                 engine.pause("exchange reconciliation disconnected")
                 log.warning("Reconciliation: %s", type(exc).__name__)

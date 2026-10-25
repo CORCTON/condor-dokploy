@@ -6,10 +6,14 @@ import os
 import time
 from contextlib import asynccontextmanager
 
+import aiohttp
+
 log = logging.getLogger(__name__)
 STAGES = {"client.start", "client.stop", "model.turn", "tool.call",
           "proposal.wait", "proposal.apply"}
 CLEANUP_TIMEOUT_SECONDS = 30
+HEARTBEAT_INTERVAL_SECONDS = 10
+HEARTBEAT_TIMEOUT_SECONDS = 5
 TOOLS = {"read_channel_history", "read_channel_message", "view_channel_image",
          "read_execution_state", "submit_signal_decisions", "submit_exit_plan"}
 EVENTS = {"Heartbeat", "ToolCallEvent", "ToolCallUpdate", "PromptDone",
@@ -84,6 +88,46 @@ class EventObserver:
 
 class WorkerRestartRequired(RuntimeError):
     """The isolated worker cannot safely accept another job with a stuck client."""
+
+
+async def send_heartbeats(session, name):
+    """Prove the isolated worker event loop is alive, including during a long model turn."""
+    previous = None
+    while True:
+        state = "waiting"
+        if os.getenv("TRADER_LLM_READY") == "true":
+            try:
+                async with (
+                    asyncio.timeout(HEARTBEAT_TIMEOUT_SECONDS),
+                    session.post(
+                        os.environ["TELEGRAM_TRADER_URL"].rstrip("/")
+                        + f"/workers/{name}/heartbeat",
+                        headers={"Authorization": "Bearer " + os.environ["TRADER_TOKEN"]},
+                        timeout=aiohttp.ClientTimeout(total=HEARTBEAT_TIMEOUT_SECONDS),
+                    ) as response,
+                ):
+                    response.raise_for_status()
+                    await response.read()
+                state = "ok"
+            except (aiohttp.ClientError, TimeoutError):
+                state = "unavailable"
+        if state != previous:
+            log.log(logging.WARNING if state == "unavailable" else logging.INFO,
+                    "Trader worker heartbeat worker=%s state=%s", name, state)
+            previous = state
+        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+
+
+@asynccontextmanager
+async def worker_heartbeat(session, name):
+    if name not in {"interpreter", "planner"}:
+        raise ValueError("unknown worker")
+    task = asyncio.create_task(send_heartbeats(session, name), name=f"trader-{name}-heartbeat")
+    try:
+        yield
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def drain(task, cleanup_started, *, timeout=CLEANUP_TIMEOUT_SECONDS):

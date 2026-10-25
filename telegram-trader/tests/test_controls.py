@@ -30,8 +30,8 @@ def controlled(tmp_path, monkeypatch):
     engine = Engine(store, exchange, enabled=True)
     engine.listener_ready = True
     engine.pause("operator requested pause")
-    for key in ("interpreter_seen", "planner_seen"):
-        store.set(key, time.time())
+    for name in ("interpreter", "planner"):
+        engine.record_heartbeat(name)
     yield store, exchange, engine
     store.close()
 
@@ -78,7 +78,7 @@ async def test_start_fails_closed(controlled, blocker):
     elif blocker == "unknown":
         store.intent("uncertain", "trade", "POST", "/orders", {})
     elif blocker in {"planner", "interpreter"}:
-        store.set(blocker + "_seen", time.time() - 181)
+        engine._worker_heartbeats[blocker] = (time.time() - 181, time.monotonic() - 181)
     elif blocker == "account":
         exchange.account["margin_mode"] = 1
     elif blocker == "auth":

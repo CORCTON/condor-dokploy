@@ -123,7 +123,8 @@ async def run_worker():
     trader_url = os.environ["TELEGRAM_TRADER_URL"].rstrip("/")
     trader_headers = {"Authorization": "Bearer " + os.environ["TRADER_TOKEN"]}
     owner = int(os.environ["ADMIN_USER_ID"])
-    async with aiohttp.ClientSession() as session:
+    async with (aiohttp.ClientSession() as session,
+                runtime["worker_heartbeat"](session, "planner")):
         while True:
             job = None
             try:

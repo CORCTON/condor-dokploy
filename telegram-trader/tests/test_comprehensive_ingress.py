@@ -76,7 +76,7 @@ async def test_authoritative_read_failure_cannot_trade_and_same_proposal_can_ret
     async with TestClient(TestServer(make_app(inbox.engine, reader))) as client:
         job, body = await accepted_entry(client)
         response = await client.post("/signals/decisions", headers=HEADERS, json=body)
-        assert response.status == (504 if error is TimeoutError else 500)
+        assert response.status == (503 if error is TimeoutError else 500)
         assert not inbox.engine.gate.writes
         assert inbox.store.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 0
         assert inbox.store.analysis(job["lease"])["status"] == "analyzing"

@@ -335,8 +335,8 @@ async def test_cancelled_tp_review_remains_recoverable_without_recreating_cancel
             assert current["status"] == "closed"
             assert exchange.positions["INJ_USDT"]["size"] == 0
             assert not remaining_targets(exchange)
-        store.set("interpreter_seen", time.time())
-        store.set("planner_seen", time.time())
+        engine.record_heartbeat("interpreter")
+        engine.record_heartbeat("planner")
         await engine.resume()
         assert not engine.paused()
 

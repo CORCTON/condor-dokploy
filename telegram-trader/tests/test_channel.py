@@ -202,8 +202,13 @@ async def test_tail_obeys_flood_wait_without_stopping_push(monkeypatch):
             raise asyncio.CancelledError
 
     monkeypatch.setattr(asyncio, "sleep", sleep)
-    engine = SimpleNamespace(listener_ready=True)
-    with pytest.raises(asyncio.CancelledError):
-        await follow_new_messages(Client(), "allowed", 100, engine, 1, time.time())
-    assert sleeps == [3, 7, 3]
-    assert engine.listener_ready
+    store = Store(":memory:")
+    engine = Engine(store, None)
+    engine.listener_ready = True
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await follow_new_messages(Client(), "allowed", 100, engine, 1, time.time())
+        assert sleeps == [3, 7, 3]
+        assert engine.listener_ready
+    finally:
+        store.close()
