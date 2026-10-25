@@ -1,6 +1,6 @@
 """Real current-revision messages with deliberately constructed owned state.
 
-These four cases supplement, never replace, the frozen 17 owned-state and 10
+These eight cases supplement, never replace, the frozen 17 owned-state and 10
 entry-intent goldens. Prices, orders and fills are synthetic, not a backtest.
 Original source text/images/history must not be rewritten to fit the seeds.
 """
@@ -59,23 +59,71 @@ CASES = [
         ),
         require_source_image=True,
     ),
+    case(
+        "real_context_JUP_first_option_closes_owned_short",
+        [15277],
+        [decision("close", target="A")],
+        [dict(trade("JUP", "short", 15272), entry="0.3738", tick="0.0001")],
+        fixture_note=(
+            "Operator confirmed on 2026-10-25: follow the first option of all-profit-taking "
+            "versus holding. A synthetic remaining JUP short from15272 exists; reported channel "
+            "TP completion is not evidence that this account's native targets already filled. "
+            "Close that remaining position and cancel its native protections."
+        ),
+    ),
+    case(
+        "real_context_SUI_continue_holding_preserves_owned_long",
+        [15104],
+        [decision("ignore")],
+        [dict(trade("SUI", "long", 15102), entry="0.7143", tick="0.0001")],
+        fixture_note=(
+            "Operator confirmed on 2026-10-25: continue holding means no exchange action. "
+            "The synthetic SUI long and all existing native protections must remain unchanged."
+        ),
+    ),
+    case(
+        "real_context_RAY_current_profit_taking_closes_owned_short",
+        [15099],
+        [decision("close", target="A")],
+        [trade("RAY", "short", 15094)],
+        fixture_note=(
+            "Operator confirmed on 2026-10-25: current profit-taking without a named TP stage "
+            "means fully close the associated owned position. Source15094 is a real technical "
+            "idea, NOT an unconditional entry and NOT evidence of a historically owned trade. "
+            "This deliberately constructed price10 short only tests management association; "
+            "it must not relabel the source or imply that automatic following opened it."
+        ),
+    ),
+    case(
+        "real_context_INJ_explicit_TP1_uses_owned_allocation",
+        [15319],
+        [decision("tp1", target="A")],
+        [trade("INJ", "short", 15317)],
+        fixture_note=(
+            "Operator confirmed on 2026-10-25: an explicit TP1 uses the existing owned TP1 "
+            "allocation, not a full close or an invented reduction. The remaining synthetic "
+            "INJ short must retain its SL and TP2 protection."
+        ),
+    ),
 ]
 
 for item in CASES:
     item["expectation_scope"] = "current_revision_context_with_constructed_owned_state"
     item["state_origin"] = "synthetic_positions_orders_and_fills_not_historical_execution"
 
-assert len(CASES) == len({item["name"] for item in CASES}) == 4
+assert len(CASES) == len({item["name"] for item in CASES}) == 8
 
 
 def assert_context_report(spec, report):
     """Additional acceptance checks beyond run_case's exact order/stop equality."""
     assert report["semantic_passed"] and report["execution_passed"], report
-    assert report["exchange_writes"] == [], "Context-only message mutated exchange state"
-    before = report["owned_before"]["A"]
-    after, = report["owned_after"]
-    for key in ("id", "symbol", "side", "message", "entry_id", "filled", "exits"):
-        assert after[key] == before[key], (key, before[key], after[key])
+    actions = spec["expected"][0]["action"]
+    if set(actions if isinstance(actions, list) else [actions]) <= {"ignore", "review"}:
+        assert report["exchange_writes"] == [], "Context-only message mutated exchange state"
+        before = report["owned_before"]["A"]
+        after, = report["owned_after"]
+        for key in ("id", "symbol", "side", "message", "entry_id", "filled", "exits"):
+            assert after[key] == before[key], (key, before[key], after[key])
     if spec.get("require_source_image"):
         assert {"op": "download", "message_id": spec["events"][0]} in report["tools"], (
             "An image-only semantic pass requires the actual frozen image to be read"

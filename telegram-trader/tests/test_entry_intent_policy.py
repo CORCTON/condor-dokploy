@@ -14,6 +14,22 @@ from test_interpreter import interpreter as interpreter  # noqa: PLC0414 -- pyte
 from trader.models import Decision
 
 
+def test_policy_separates_unsupported_execution_from_retrospective_corrections(interpreter):
+    assert "unsupported execution" in interpreter.POLICY
+    assert "do not silently ignore it" in interpreter.POLICY
+    assert "management instruction in a different claimed event" in interpreter.POLICY
+    assert "retrospective symbol correction without a new execution instruction is ignore" in interpreter.POLICY
+    assert "fresh edited first entry still follows the normal entry rules" in interpreter.POLICY
+
+
+def test_primary_recommendation_keeps_explicit_stages_and_conditions(interpreter):
+    assert "the operator selects the first" in interpreter.POLICY
+    assert "preserving its qualifications" in interpreter.POLICY
+    assert "an explicit TP1/TP2 or quantity takes precedence" in interpreter.POLICY
+    assert "not required additional actions" in interpreter.POLICY
+    assert "does not become unconditional" in interpreter.POLICY
+
+
 async def test_entry_policy_uses_existing_model_call_and_restricted_tool_path(
     interpreter, delayed_client, monkeypatch,
 ):

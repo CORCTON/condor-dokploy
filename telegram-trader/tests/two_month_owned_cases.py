@@ -111,11 +111,13 @@ CASES = [
     case(
         "real_two_month_SUI_optional_reduce_and_breakeven_compound",
         [15069],
-        [decision("review")],
+        [decision(["sl", "targets"], target="A", sl="0.8192")],
         [dict(trade("SUI", "long", 15065), entry="0.8192", tick="0.0001", market_after="0.8300")],
         fixture_note=(
-            "Cost SL plus optional reduction for heavy positions has undefined size/selection. "
-            "This strict oracle surfaces policy ambiguity, not a claim that every refusal is optimal."
+            "Operator confirmed on 2026-10-25: follow the primary cost-SL instruction; "
+            "the optional heavy-position reduction does not authorize reducing this position. "
+            "Use own fill0.8192 and preserve position size and existing TP orders. The earlier "
+            "frozen strict-review failure remains evidence, not retroactively relabelled."
         ),
     ),
     case(

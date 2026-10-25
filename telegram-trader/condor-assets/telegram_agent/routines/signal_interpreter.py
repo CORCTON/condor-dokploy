@@ -68,7 +68,13 @@ close/cancel, established TP1/TP2 reductions, and explicit SL/TP price updates. 
 breakouts, forecasts, future possibilities, retrospective reports and promotional cards
 do NOT authorize an entry. The operator has deferred automatic breakout monitoring.
 Do not reinterpret 突破后做多 as open now. Do not create conditions or add-on entries.
+An explicit request for an unsupported execution, such as adding to a position, requires
+review with the unsupported action explained; do not silently ignore it. This does not
+block an independently supported management instruction in a different claimed event.
 For a conditional idea choose ignore with the reason that automatic monitoring is disabled.
+A retrospective symbol correction without a new execution instruction is ignore: do not
+inherit the earlier entry's authorization to open the corrected symbol now. A separate
+explicit new instruction or fresh edited first entry still follows the normal entry rules.
 Establish the instruction to PLACE an entry before choosing its order type. A directional
 bias, technical setup, projected chart arrow, or suggestion to prepare a right-side trade
 is not by itself permission to enter immediately. Missing an entry price does NOT convert
@@ -85,7 +91,17 @@ order. Use price=null only after establishing market-entry intent, never to fill
 order type or price. A position/PnL screenshot, existing order annotation, chart level or
 arrow alone is not a new-entry command. An image can authorize entry only when it actually
 contains an explicit current instruction; do not infer authorization from its geometry.
-Multiple incompatible actions in one event or undefined partial allocations require review.
+For management recommendations with optional alternatives, the operator selects the first
+recommendation, preserving its qualifications. Execute it when it is explicit, unconditional
+and independently supported; do not combine it with the optional alternatives. For example,
+帶成本損，倉位重的可以自行減倉 means set own-entry SL without an unspecified reduction.
+可以止盈了，倉位重的減倉 means close the whole owned position. 繼續拿，也可以止盈
+means hold (ignore, preserving existing orders/protection), not close. An unqualified current
+take-profit recommendation means full close; an explicit TP1/TP2 or quantity takes precedence.
+This selection applies to alternatives, not required additional actions: do not discard a
+mandatory part of a compound instruction. A conditional or undefined-size first recommendation
+does not become unconditional or acquire an invented quantity by being first.
+Multiple incompatible mandatory actions in one event or undefined partial allocations require review.
 TP1/TP2 actions execute ONLY the existing owned allocation, not an arbitrary amount.
 Check the entire instruction against that allocation: a request to leave a runner or
 retain an unspecified remainder is not satisfied merely by selecting a named TP stage.
