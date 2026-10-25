@@ -147,17 +147,11 @@ def make_app(engine, channel=None, credentials=None):
 
     async def plan_failed(request):
         body = await request.json()
-        trade = engine.store.trade(body.get("trade_id"))
-        if trade and trade.get("plan_token") == body.get("lease"):
-            error = str(body.get("error", "planner failed"))[:100]
-            if trade.get("plan_error") != error:
-                engine.store.notice(
-                    f"Exit planning failed for {trade['symbol']}: {error}. "
-                    "No invented stop or automatic position close; review protection status."
-                )
-                trade["plan_error"] = error
-                engine.store.save_trade(trade)
-        return web.json_response({"recorded": True})
+        released = await engine.fail_plan(
+            body.get("trade_id"), body.get("version"), body.get("lease"),
+            str(body.get("error", "planner failed"))[:100],
+        )
+        return web.json_response({"recorded": True, "released": released})
 
     async def plan_propose(request):
         body = await request.json()
@@ -240,7 +234,10 @@ def make_app(engine, channel=None, credentials=None):
     async def image(request):
         if channel is None:
             raise web.HTTPServiceUnavailable(text="channel reader unavailable")
-        data, mime = await channel.image(int(request.match_info["message_id"]))
+        try:
+            data, mime = await channel.image(int(request.match_info["message_id"]))
+        except TimeoutError as exc:
+            raise web.HTTPServiceUnavailable(text="channel image temporarily unavailable") from exc
         return web.Response(body=data, content_type=mime, headers={"Cache-Control": "no-store"})
 
     app.router.add_get("/health", health)

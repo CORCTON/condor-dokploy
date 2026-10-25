@@ -3,9 +3,11 @@
 import asyncio
 import json
 import os
+import sys
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import aiohttp
 import eval_comprehensive_channel as evaluation
@@ -480,3 +482,102 @@ async def test_harness_applies_signal_and_plan_before_each_model_cleanup(
     assert report["proposal_ready_seconds"] <= report["execution_applied_seconds"]
     assert report["plan_proposal_ready_seconds"] <= report["plan_applied_seconds"]
     assert report["execution_applied_seconds"] <= report["seconds"] + 0.01
+
+
+@pytest.mark.parametrize("origin", ["interpreter", "planner"])
+async def test_run_case_propagates_stuck_cleanup_after_recording_failure_and_closing_store(
+    monkeypatch, interpreter, planner, origin
+):
+    monkeypatch.setenv("TRADER_TOKEN", "harness-local-only")
+    monkeypatch.setenv("ADMIN_USER_ID", "1")
+    monkeypatch.setenv("TELEGRAM_TRADER_URL", "http://127.0.0.1:1")
+    routine = interpreter if origin == "interpreter" else planner
+    failure = routine.runtime["WorkerRestartRequired"]("injected stuck cleanup")
+    closed = []
+
+    class TrackedStore(Store):
+        def close(self):
+            super().close()
+            closed.append(True)
+
+    @asynccontextmanager
+    async def model(job, _owner, session):
+        if origin == "interpreter":
+            raise failure
+        item = model_decision(symbol="INJ", side="short").model_dump()
+        item.update(event_id=job["events"][0]["event_id"], evidence_message_ids=[15333])
+        result = {"decisions": [item]}
+        await interpreter.api(session, "POST", "/signals/proposals", json={
+            "lease": job["lease"], "result": result,
+        })
+        yield result
+
+    @asynccontextmanager
+    async def plan_failure(*args):
+        if origin == "planner":
+            raise failure
+        yield None
+
+    monkeypatch.setattr(evaluation, "Store", TrackedStore)
+    monkeypatch.setattr(interpreter, "interpret_current", model)
+    monkeypatch.setattr(planner, "generate_plan", plan_failure)
+    spec = deepcopy(next(item for item in CASES if item["name"] == "real_INJ_market_short"))
+    history = {15333: evaluation.message(15333, "#INJ 当前价格入场一笔空单")}
+    with pytest.raises(type(failure)) as caught:
+        await evaluation.run_case(spec, interpreter, planner, history, {}, 1)
+    assert caught.value is failure
+    assert failure.evaluation_report["case"] == spec["name"]
+    assert failure.evaluation_report["passed"] is False
+    assert "seconds" in failure.evaluation_report
+    assert "WorkerRestartRequired" in failure.evaluation_report["error"]
+    assert closed == [True]
+
+
+async def test_evaluation_main_persists_fatal_failure_and_exits_without_starting_next_case(
+    tmp_path, monkeypatch
+):
+    class WorkerRestartRequired(RuntimeError):
+        pass
+
+    specs = [case("first", [], []), case("must-not-run", [], [])]
+    calls, exits = [], []
+    root, snapshot = tmp_path / "root", tmp_path / "snapshot"
+    assets = root / "telegram-trader/tests/assets"
+    assets.mkdir(parents=True)
+    snapshot.mkdir()
+    (snapshot / "history.json").write_text("{}")
+    for name in ("explicit-short", "commentary"):
+        (assets / (name + ".png")).write_bytes(b"local fixture")
+    for name in ("condor", "condor.agents", "condor.agents.agent"):
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    sys.modules["condor.agents.agent"].AgentStore = lambda: SimpleNamespace(
+        get=lambda slug: SimpleNamespace(agent_key="fixture-model")
+    )
+    monkeypatch.setattr(evaluation.sys, "argv", ["eval", str(root), str(snapshot)])
+    monkeypatch.setattr(evaluation, "CASES", specs)
+    monkeypatch.setattr(evaluation, "load", lambda *args: SimpleNamespace(
+        runtime={"WorkerRestartRequired": WorkerRestartRequired}
+    ))
+
+    async def fail_first(spec, *args):
+        calls.append(spec["name"])
+        failure = WorkerRestartRequired("injected cleanup stall")
+        failure.evaluation_report = {"case": spec["name"], "passed": False,
+                                     "error": "WorkerRestartRequired"}
+        raise failure
+
+    def exit_process(code):
+        exits.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(evaluation, "run_case", fail_first)
+    monkeypatch.setattr(evaluation.os, "_exit", exit_process)
+    with pytest.raises(SystemExit) as stopped:
+        await evaluation.main()
+    assert stopped.value.code == 70 and exits == [70]
+    assert calls == ["first"]
+    assert json.loads((root / "results.json").read_text()) == [
+        {"case": "first", "passed": False, "error": "WorkerRestartRequired"}
+    ]
+    assert json.loads((root / "failure.json").read_text())["case"] == "first"
+    assert not (root / "done.json").exists()

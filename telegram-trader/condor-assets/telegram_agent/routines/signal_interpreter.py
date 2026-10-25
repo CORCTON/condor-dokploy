@@ -15,6 +15,8 @@ from pydantic import BaseModel
 
 CONTINUOUS = True
 log = logging.getLogger(__name__)
+runtime = runpy.run_path(str(Path(__file__).resolve().parents[1] / "model_runtime.py"),
+                         run_name="telegram_signal_model")
 
 POLICY = """
 You interpret an operator-authorized Telegram signal channel. Speak Chinese in reasons.
@@ -135,6 +137,7 @@ async def generate_decisions(job, owner, session, cleanup_started):
                 "command": sys.executable,
                 "args": [str(Path(__file__).resolve().parents[1] / "channel_tools.py")],
                 "env": [
+                    {"name": "TRADER_PARENT_PID", "value": str(os.getpid())},
                     {"name": "SIGNAL_LEASE", "value": job["lease"]},
                     {"name": "SIGNAL_SCHEMA", "value": json.dumps(job["output_schema"])},
                 ],
@@ -182,13 +185,18 @@ async def generate_decisions(job, owner, session, cleanup_started):
     )
     reason = ""
     try:
-        await client.start()
-        async for event in client.prompt_stream(prompt, images=images or None):
-            if isinstance(event, PromptDone):
-                reason = event.stop_reason
+        async with runtime["stage"]("client.start"):
+            await client.start()
+        observe = runtime["EventObserver"]()
+        async with runtime["stage"]("model.turn"):
+            async for event in client.prompt_stream(prompt, images=images or None):
+                observe(event)
+                if isinstance(event, PromptDone):
+                    reason = event.stop_reason
     finally:
         cleanup_started.set()
-        await client.stop()
+        async with runtime["stage"]("client.stop"):
+            await client.stop()
     if reason != "end_turn":
         raise RuntimeError("Signal interpreter did not complete normally")
     result = await api(session, "GET", f"/signals/{job['lease']}/proposal")
@@ -204,7 +212,7 @@ async def interpret_current(job, owner, session):
     task = asyncio.create_task(generate_decisions(job, owner, session, cleanup_started))
     result = None
     try:
-        async with asyncio.timeout(150):
+        async with runtime["stage"]("proposal.wait"), asyncio.timeout(150):
             while True:
                 await asyncio.wait({task}, timeout=0.25)
                 finished_before_read = task.done()
@@ -227,17 +235,7 @@ async def interpret_current(job, owner, session):
         # must not consume the accepted signal's remaining execution-age budget.
         yield result
     finally:
-        if not task.done() and not task.cancelling() and not cleanup_started.is_set():
-            task.cancel()
-        cleanup = asyncio.gather(task, return_exceptions=True)
-        cancelled = False
-        while not cleanup.done():
-            try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                cancelled = True
-        if cancelled:
-            raise asyncio.CancelledError
+        await runtime["drain"](task, cleanup_started)
 
 
 async def run_worker():
@@ -255,16 +253,19 @@ async def run_worker():
                     continue
                 async with interpret_current(job, owner, session) as result:
                     if result is not None:
-                        await api(
-                            session,
-                            "POST",
-                            "/signals/decisions",
-                            json={"lease": job["lease"], "result": result},
-                        )
+                        async with runtime["stage"]("proposal.apply"):
+                            await api(
+                                session,
+                                "POST",
+                                "/signals/decisions",
+                                json={"lease": job["lease"], "result": result},
+                            )
+            except runtime["WorkerRestartRequired"]:
+                runtime["restart_worker"]()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 -- model boundary, no fallback execution
-                log.warning("Channel interpreter: %s", type(exc).__name__)
+                log.warning("Channel interpreter: %s", ",".join(runtime["error_types"](exc)))
                 if job:
                     try:
                         await api(
@@ -289,5 +290,6 @@ async def run(config: Config, context):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(process)d %(name)s %(message)s")
     asyncio.run(run_worker())

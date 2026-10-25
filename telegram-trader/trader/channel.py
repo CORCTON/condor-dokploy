@@ -4,6 +4,8 @@ import asyncio
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+# Evidence clients allow 20 seconds total; leave time to return a retryable error.
+IMAGE_TIMEOUT_SECONDS = 15
 
 
 def describe_message(message):
@@ -70,7 +72,7 @@ class ChannelReader:
         }
 
     async def image(self, message_id):
-        async with self.image_lock:
+        async with asyncio.timeout(IMAGE_TIMEOUT_SECONDS), self.image_lock:
             message = await self.message(message_id)
             file = getattr(message, "file", None)
             mime = getattr(file, "mime_type", None)

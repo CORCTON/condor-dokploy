@@ -51,6 +51,11 @@ def source_get(path):
         return response.read(), response.headers.get_content_type()
 
 
+def restart_errors(interpreter, planner):
+    return tuple(routine.runtime["WorkerRestartRequired"]
+                 for routine in (interpreter, planner) if hasattr(routine, "runtime"))
+
+
 def message(mid, text, reply=None, **fields):
     return dict(message_id=mid, text=text, reply_to_message_id=reply,
                 source_time=time.time(), edited_at=None, media=None, context_only=True, **fields)
@@ -377,10 +382,13 @@ async def run_case(spec, interpreter, planner, history, image_cache, run_number)
                 report["real_model_exit_plan"] = planned
         report.update(tools=channel.calls, exchange_writes=exchange.writes,
                       positions_after=exchange.positions, owned_after=store.trades())
-    except Exception as exc:  # noqa: BLE001 -- retain each independent evaluation failure
+    except Exception as exc:  # Retain each independent evaluation failure.
         report.update(error=type(exc).__name__ + ": " + str(exc), traceback=traceback.format_exc())
         if "channel" in locals():
             report["tools"] = channel.calls
+        if isinstance(exc, restart_errors(interpreter, planner)):
+            exc.evaluation_report = report
+            raise  # An abandoned model task must not overlap the next case.
     finally:
         report["seconds"] = round(time.monotonic() - started, 2)
         report["passed"] = (report["semantic_passed"] and report["execution_passed"]
@@ -440,7 +448,21 @@ async def main():
     planner = load("candidate_planner", root / "telegram-trader/condor-assets/telegram_agent/routines/exit_planner.py")
     reports = []
     for spec in specs:
-        report = await run_case(spec, interpreter, planner, history, image_cache, 1)
+        try:
+            report = await run_case(spec, interpreter, planner, history, image_cache, 1)
+        except restart_errors(interpreter, planner) as exc:
+            report = exc.evaluation_report
+            reports.append(report)
+            (root / "results.json").write_text(json.dumps(reports, ensure_ascii=False, indent=2))
+            (root / "failure.json").write_text(json.dumps({
+                "case": spec["name"], "error": type(exc).__name__,
+                "reason": "Model cleanup stalled; evaluation stopped without starting another case",
+            }, ensure_ascii=False, indent=2))
+            print(json.dumps({"case": spec["name"], "passed": False,
+                              "error": type(exc).__name__, "fatal": True}), flush=True)
+            # asyncio.run would cancel and await the very SDK cleanup that is
+            # already stuck. This is the dedicated evaluation process boundary.
+            os._exit(70)
         reports.append(report)
         (root / "results.json").write_text(json.dumps(reports, ensure_ascii=False, indent=2))
         print(json.dumps({k: report.get(k) for k in ("case", "passed", "semantic_passed", "execution_passed", "seconds", "error")}), flush=True)

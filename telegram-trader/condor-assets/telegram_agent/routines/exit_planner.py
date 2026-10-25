@@ -14,6 +14,8 @@ from pydantic import BaseModel
 
 CONTINUOUS = True
 log = logging.getLogger(__name__)
+runtime = runpy.run_path(str(Path(__file__).resolve().parents[1] / "model_runtime.py"),
+                         run_name="telegram_exit_model")
 
 
 class Config(BaseModel):
@@ -48,6 +50,7 @@ async def request_plan(job, owner, cleanup_started):
                 "command": sys.executable,
                 "args": [str(Path(__file__).resolve().parents[1] / "channel_tools.py")],
                 "env": [
+                    {"name": "TRADER_PARENT_PID", "value": str(os.getpid())},
                     {
                         "name": "EXIT_PLAN_JOB",
                         "value": json.dumps(
@@ -68,13 +71,18 @@ async def request_plan(job, owner, cleanup_started):
     prompt = runtime_context.build_agent_context(agent, owner, task, "")
     reason = ""
     try:
-        await client.start()
-        async for event in client.prompt_stream(prompt):
-            if isinstance(event, PromptDone):
-                reason = event.stop_reason
+        async with runtime["stage"]("client.start"):
+            await client.start()
+        observe = runtime["EventObserver"]()
+        async with runtime["stage"]("model.turn"):
+            async for event in client.prompt_stream(prompt):
+                observe(event)
+                if isinstance(event, PromptDone):
+                    reason = event.stop_reason
     finally:
         cleanup_started.set()
-        await client.stop()
+        async with runtime["stage"]("client.stop"):
+            await client.stop()
     if reason != "end_turn":
         raise RuntimeError("Exit planner did not complete normally")
 
@@ -95,7 +103,8 @@ async def generate_plan(job, owner):
     cleanup_started = asyncio.Event()
     task = asyncio.create_task(request_plan(job, owner, cleanup_started))
     try:
-        async with aiohttp.ClientSession() as session, asyncio.timeout(90):
+        async with (aiohttp.ClientSession() as session,
+                    runtime["stage"]("proposal.wait"), asyncio.timeout(90)):
             while True:
                 await asyncio.wait({task}, timeout=0.25)
                 finished_before_read = task.done()
@@ -107,17 +116,7 @@ async def generate_plan(job, owner):
                     raise ValueError("Model ended without a validated exit-plan tool call")
         yield plan  # the caller applies the validated plan before model cleanup
     finally:
-        if not task.done() and not cleanup_started.is_set() and not task.cancelling():
-            task.cancel()
-        cleanup = asyncio.gather(task, return_exceptions=True)
-        cancelled = False
-        while not cleanup.done():
-            try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                cancelled = True
-        if cancelled:
-            raise asyncio.CancelledError
+        await runtime["drain"](task, cleanup_started)
 
 
 async def run_worker():
@@ -144,6 +143,7 @@ async def run_worker():
                     continue
                 async with (
                     generate_plan(job, owner) as plan,
+                    runtime["stage"]("proposal.apply"),
                     session.post(
                         trader_url + "/plans",
                         headers=trader_headers,
@@ -157,12 +157,14 @@ async def run_worker():
                     ) as response,
                 ):
                     response.raise_for_status()
+            except runtime["WorkerRestartRequired"]:
+                runtime["restart_worker"]()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 -- model job boundary, never retry exchange writes
                 # No exception payloads: URLs can contain credentials. The service
                 # retains job state; model failure never cancels/closes a position.
-                log.warning("Telegram exit planner: %s", type(exc).__name__)
+                log.warning("Telegram exit planner: %s", ",".join(runtime["error_types"](exc)))
                 if job:
                     try:
                         async with session.post(
@@ -170,6 +172,7 @@ async def run_worker():
                             headers=trader_headers,
                             json={
                                 "trade_id": job["trade_id"],
+                                "version": job["version"],
                                 "lease": job["lease"],
                                 "error": type(exc).__name__,
                             },
@@ -188,5 +191,6 @@ async def run(config: Config, context):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(process)d %(name)s %(message)s")
     asyncio.run(run_worker())

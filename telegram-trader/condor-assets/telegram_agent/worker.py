@@ -10,6 +10,28 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+def bind_mcp_parent(expected_pid):
+    """Linux MCP stdio children have their own process group; bind their lifetime."""
+    if sys.platform != "linux":
+        return
+    if expected_pid < 1:
+        raise ValueError("invalid MCP parent PID")
+    if os.getppid() != expected_pid:
+        raise SystemExit(0)
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+                          ctypes.c_ulong, ctypes.c_ulong]
+    libc.prctl.restype = ctypes.c_int
+    if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    # The parent can die between the first check and prctl registering the signal.
+    if os.getppid() != expected_pid:
+        raise SystemExit(0)
+
+
 async def run_isolated(path):
     path = Path(path).resolve()
     while True:

@@ -31,7 +31,8 @@ async def test_stdio_tools_read_only_complete_history_and_image(monkeypatch):
                 args=[
                     str(Path(__file__).parents[1] / "condor-assets/telegram_agent/channel_tools.py")
                 ],
-                env={**os.environ, "TELEGRAM_TRADER_URL": str(http.make_url("/")).rstrip("/")},
+                env={**os.environ, "TELEGRAM_TRADER_URL": str(http.make_url("/")).rstrip("/"),
+                     "TRADER_PARENT_PID": str(os.getpid())},
             )
             async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
                 await session.initialize()
@@ -78,6 +79,7 @@ async def test_typed_proposal_tool_rejects_bad_fields_without_exchange_writes(mo
                 ],
                 env={
                     **os.environ,
+                    "TRADER_PARENT_PID": str(os.getpid()),
                     "TELEGRAM_TRADER_URL": str(http.make_url("/")).rstrip("/"),
                     "SIGNAL_LEASE": job["lease"],
                     "SIGNAL_SCHEMA": json.dumps(job["output_schema"]),
@@ -126,6 +128,7 @@ async def test_exit_plan_tool_only_stages_valid_fresh_arguments(monkeypatch):
                 ],
                 env={
                     **os.environ,
+                    "TRADER_PARENT_PID": str(os.getpid()),
                     "TELEGRAM_TRADER_URL": str(http.make_url("/")).rstrip("/"),
                     "EXIT_PLAN_JOB": json.dumps(
                         {k: job[k] for k in ("trade_id", "version", "lease")}

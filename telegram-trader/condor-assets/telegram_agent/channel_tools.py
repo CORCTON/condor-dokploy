@@ -3,12 +3,24 @@
 import asyncio
 import base64
 import json
+import logging
 import os
+import runpy
+from pathlib import Path
+
+if __name__ == "__main__":
+    from worker import bind_mcp_parent
+
+    # Arm the parent-death guard before the heavier MCP/aiohttp imports.
+    bind_mcp_parent(int(os.environ["TRADER_PARENT_PID"]))
 
 import aiohttp
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
+
+runtime = runpy.run_path(str(Path(__file__).with_name("model_runtime.py")),
+                         run_name="telegram_channel_tools")
 
 mcp = Server(
     "telegram_channel_context",
@@ -154,6 +166,11 @@ async def list_tools():
 
 @mcp.call_tool()
 async def call_tool(name, arguments):
+    async with runtime["stage"]("tool.call", tool=name):
+        return await execute_tool(name, arguments)
+
+
+async def execute_tool(name, arguments):
     if os.getenv("EXIT_PLAN_JOB"):
         if name != "submit_exit_plan":
             raise ValueError("only the assigned exit-plan tool is available")
@@ -177,4 +194,6 @@ async def main():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(process)d %(name)s %(message)s")
     asyncio.run(main())

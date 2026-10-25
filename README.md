@@ -87,7 +87,14 @@ channel history are distinct; no ability to query history should be assumed outs
 the signal interpreter's explicitly mounted read-only tools.
 Each continuous Routine supervises its own worker process: Condor's per-process API
 semaphore must not let an operator chat block a channel update or exit plan.
-Stopping a Routine terminates that worker and its entire MCP process group.
+Stopping a Routine terminates its worker; Linux MCP children bind their lifetime
+to that exact worker even when the SDK creates a separate process group.
+Accepted proposals execute before client cleanup. Cleanup gets a 30-second
+recovery budget; a stuck client exits its isolated worker and the supervisor
+restarts it, without replaying accepted exchange writes. Tool/model lifecycle
+logs contain stage, duration and exception types, never prompts or credentials.
+An exit-planning failure releases its lease early only when no plan or uncertain
+write exists. Original model deadlines and entry-age checks remain unchanged.
 
 ## Safety and execution contract
 

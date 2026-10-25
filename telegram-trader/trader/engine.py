@@ -737,6 +737,38 @@ class Engine:
                 raise Review("AI price not on exchange tick")
         return plan
 
+    async def fail_plan(self, trade_id, version, lease, error):
+        """Release only a failed, unproposed job; never retry an exchange operation."""
+        async with self.lock:
+            trade = self.store.trade(trade_id)
+            if (
+                not trade
+                or trade["status"] != "working"
+                or trade["version"] != version
+                or trade.get("plan_token") != lease
+                or not trade["plan_needed"]
+                or trade.get("close_requested")
+            ):
+                return False
+            if trade.get("plan_error") != error:
+                self.store.notice(
+                    f"Exit planning failed for {trade['symbol']}: {error}. "
+                    "No invented stop or automatic position close; review protection status."
+                )
+                trade["plan_error"] = error
+            # apply_plan holds this lock and persists plan before any exit write.
+            # An accepted proposal must remain immutable even if its HTTP reply
+            # was lost. Only a job that reached neither stage can be regenerated.
+            released = (
+                trade.get("plan_proposal") is None
+                and trade.get("plan") is None
+                and not self.store.unknowns()
+            )
+            if released:
+                trade.update(plan_token=None, plan_lease=0)
+            self.store.save_trade(trade)
+            return released
+
     async def propose_plan(self, trade_id, version, lease, plan):
         async with self.lock:
             trade = self.plan_trade(trade_id, version, lease)
