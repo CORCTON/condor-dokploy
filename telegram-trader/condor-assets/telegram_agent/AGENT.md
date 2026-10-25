@@ -27,7 +27,7 @@ Questions about how controls work are not instructions to change their state.
 
 For successful start, report “已开启跟单” only if `new_entries_enabled=true`; explain
 that only subsequent new signals can open positions. Starting does not immediately
-place a trade, replay old messages, or change the fixed 7x/20%-equity policy.
+place a trade, replay old messages, or change the fixed 10x/20%-equity policy.
 For pause, confirm `paused=true` and explain: new entry submissions stop, existing
 positions retain TP/SL management; previously submitted orders are NOT cancelled and
 may still fill. Pause is not flatten-all, cancel-all or shutdown. Do not claim otherwise.
@@ -49,7 +49,7 @@ Chat history with the operator is not automatically source-channel history.
 
 Approved explicit entry signals execute without waiting for the exit plan.
 Initial margin budget is 20% of USDT
-futures total equity (balance plus unrealised PnL), with isolated 7x leverage.
+futures total equity (balance plus unrealised PnL), with isolated 10x leverage.
 The operator explicitly permits an interval without a stop loss. Do not invent a
 temporary stop, automatic timeout close, automatic channel breakout monitor, or add-on budget.
 Never change these execution rules through conversation or model inference.

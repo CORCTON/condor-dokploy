@@ -9,7 +9,7 @@ from .gate import GateError
 from .models import Plan
 from .models import decimal as D
 
-LEVERAGE = 7
+LEVERAGE = 10
 
 
 class Review(Exception):
@@ -460,9 +460,28 @@ class Engine:
 
     async def resize_targets(self, trade):
         """Allocate later limit fills without leaving the additional fill orphaned."""
+        if trade.get("close_requested"):
+            return
         allocations = [trade["exits"][name] for name in ("tp1", "tp2") if name in trade["exits"]]
         if any(item.get("take_attempt", 0) > 0 and "take_filled" not in item for item in allocations):
             raise Review("legacy TP reduction needs fill reconciliation before reallocating")
+        if any(
+            item.get("done")
+            and not item.get("take_pending")
+            and item.get("filled", 0) + item.get("take_filled", 0) < item["size"]
+            for item in allocations
+        ):
+            sl = trade["exits"].get("sl")
+            if sl:
+                result = await self.gate.get(f"/price_orders/{sl['id']}")
+                if result["status"] != "open" and result.get("finish_as") == "succeeded":
+                    await self.close_trade(trade)
+                    return
+                if (
+                    result["status"] == "open" and time.time() - sl["created"] > 82800
+                ) or (result["status"] != "open" and result.get("finish_as") == "expired"):
+                    await self.renew_stop(trade)
+            raise Review("TP closed before its allocation completed; manual review required")
         if (
             not trade["plan_needed"]
             and allocations
@@ -483,8 +502,11 @@ class Engine:
             )
         )
         tp1 = trade["exits"].get("tp1")
+        tp2 = trade["exits"].get("tp2")
         if tp1 and tp1.get("done") and not tp1.get("take_pending"):
             first = tp1.get("filled", 0) + tp1.get("take_filled", 0)
+        elif tp2 and tp2.get("done") and not tp2.get("take_pending"):
+            first = trade["filled"] - tp2.get("filled", 0) - tp2.get("take_filled", 0)
         for name, target in (("tp1", first), ("tp2", trade["filled"] - first)):
             item = trade["exits"].get(name)
             if not item:
@@ -566,6 +588,9 @@ class Engine:
             self.store.save_trade(trade)
         position = await self.owned_position(trade)
         if D(position["size"]) == 0:
+            if replace:
+                # A close can finish after refresh but before SL renewal.
+                return
             if source == "channel" and not trade["entry_terminal"]:
                 self.store.notice(f"Channel SL saved pending fill: {trade['symbol']} @ {price}.")
                 return

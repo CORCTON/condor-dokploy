@@ -28,13 +28,15 @@ class Exchange:
     """Exchange simulator with independent order/position state and injected failures."""
 
     def __init__(self):
+        # 70 USDT equity at 20% margin, 10x and price 10 yields the 14-contract
+        # entry used by the partial-fill/restart fixtures below.
         self.account = {
             "currency": "USDT",
             "in_dual_mode": False,
             "enable_evolved_classic": False,
-            "total": "100",
+            "total": "70",
             "unrealised_pnl": "0",
-            "available": "100",
+            "available": "70",
             "margin_mode": 0,
             "position_mode": "single",
         }
@@ -42,7 +44,7 @@ class Exchange:
         self.position = {
             "size": 0,
             "leverage": "0",
-            "lever": "7",
+            "lever": "10",
             "pos_margin_mode": "isolated",
             "mode": "single",
             "mark_price": "10",
@@ -187,8 +189,9 @@ def test_legacy_executor_fixture_labels(text, action, symbol):
 
 
 def test_sizing_equity_not_available():
-    assert size_order("100", "25", "10", CONTRACT) == (14, "20.0")
-    assert size_order("125", "100", "10", CONTRACT) == (17, "25.0")
+    assert size_order("100", "25", "10", CONTRACT) == (20, "20.0")
+    assert size_order("125", "100", "10", CONTRACT) == (25, "25.0")
+    assert size_order("125", "100", "11", CONTRACT) == (22, "25.0")
     with pytest.raises(Review, match="insufficient"):
         size_order("100", "20", "10", CONTRACT)
 
@@ -203,6 +206,7 @@ async def test_model_approved_entry_does_not_wait_for_exit_plan(rig):
     store, exchange, _ = rig
     trade = await signal(rig)
     assert trade["filled"] == 14
+    assert trade["equity"] == "70" and trade["margin_budget"] == "14.0"
     assert trade["entry_price"] == "10"
     assert trade["plan_needed"] is True
     assert exchange.position["size"] == -14
@@ -212,9 +216,11 @@ async def test_model_approved_entry_does_not_wait_for_exit_plan(rig):
 
 
 async def test_equity_includes_upl(rig):
+    rig[1].account["total"] = "100"
     rig[1].account["unrealised_pnl"] = "25"
     trade = await signal(rig)
-    assert trade["lots"] == 17 and trade["equity"] == "125"
+    assert trade["lots"] == 25 and trade["equity"] == "125"
+    assert trade["margin_budget"] == "25.0"
 
 
 async def test_duplicate_and_edited_entry_never_resends(rig):
@@ -658,7 +664,7 @@ async def test_deprecated_account_flag_does_not_reject_classic(rig):
     rig[1].account["enable_evolved_classic"] = True
     await signal(rig)
     assert len(rig[1].orders) == 1
-    assert rig[1].writes[0][3] == {"leverage": "7", "margin_mode": "isolated"}
+    assert rig[1].writes[0][3] == {"leverage": "10", "margin_mode": "isolated"}
 
 
 @pytest.mark.parametrize("field", ["margin_mode", "position_mode"])

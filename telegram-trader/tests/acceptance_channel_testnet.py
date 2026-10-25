@@ -89,23 +89,26 @@ async def cycle(gate, session, name, interpreter, planner):
             return
         job = await inbox.claim()
         started = time.monotonic()
-        raw = await interpreter.interpret_current(job, int(os.environ["ADMIN_USER_ID"]), session)
-        assert raw is not None, "Analysis became stale; no test decision submitted"
-        decisions = Decisions.model_validate(raw)
-        actual = [d.action for d in decisions.decisions]
-        item = {
-            "message_id": number,
-            "expected": expected,
-            "actual": actual,
-            "model_seconds": round(time.monotonic() - started, 2),
-            "decisions": raw,
-        }
-        report["events"].append(item)
-        print(json.dumps(item, ensure_ascii=False), flush=True)
-        acceptable = {expected} if isinstance(expected, str) else set(expected)
-        assert len(actual) == 1 and actual[0] in acceptable, "Model intent did not match test case"
-        await inbox.apply(job["lease"], decisions)
-        item["through_execution_seconds"] = round(time.monotonic() - started, 2)
+        async with interpreter.interpret_current(job, int(os.environ["ADMIN_USER_ID"]), session) as raw:
+            assert raw is not None, "Analysis became stale; no test decision submitted"
+            decisions = Decisions.model_validate(raw)
+            actual = [d.action for d in decisions.decisions]
+            item = {
+                "message_id": number,
+                "expected": expected,
+                "actual": actual,
+                "proposal_ready_seconds": round(time.monotonic() - started, 6),
+                "model_seconds": round(time.monotonic() - started, 2),
+                "timing_note": "model_seconds is legacy time to proposal, not pure inference",
+                "decisions": raw,
+            }
+            report["events"].append(item)
+            print(json.dumps(item, ensure_ascii=False), flush=True)
+            acceptable = {expected} if isinstance(expected, str) else set(expected)
+            assert len(actual) == 1 and actual[0] in acceptable, "Model intent did not match test case"
+            await inbox.apply(job["lease"], decisions)
+            item["execution_applied_seconds"] = round(time.monotonic() - started, 6)
+            item["through_execution_seconds"] = round(time.monotonic() - started, 2)
         row = store.db.execute(
             "SELECT status,detail FROM events WHERE id=?", (event_id,)
         ).fetchone()
@@ -149,7 +152,7 @@ async def cycle(gate, session, name, interpreter, planner):
             report["position"] = {
                 k: position.get(k) for k in ("size", "lever", "mode", "pos_margin_mode")
             }
-            assert position["pos_margin_mode"] == "isolated" and Decimal(position["lever"]) == 7
+            assert position["pos_margin_mode"] == "isolated" and Decimal(position["lever"]) == 10
             assert Decimal(trade["margin_budget"]) == Decimal(trade["equity"]) * Decimal("0.2")
             before = len(gate.writes)
             await send(entry, 1, "open")
@@ -159,14 +162,14 @@ async def cycle(gate, session, name, interpreter, planner):
             assert job is not None
             started = time.monotonic()
             writes_before_plan = len(gate.writes)
-            raw = await asyncio.wait_for(
-                planner.generate_plan(job, int(os.environ["ADMIN_USER_ID"])), 90
-            )
-            assert ["submit_exit_plan"] in evidence.calls
-            assert len(gate.writes) == writes_before_plan, "Proposal tool must not place orders"
-            await engine.apply_plan(
-                job["trade_id"], job["version"], job["lease"], Plan.model_validate(raw)
-            )
+            async with planner.generate_plan(job, int(os.environ["ADMIN_USER_ID"])) as raw:
+                report["plan_proposal_ready_seconds"] = round(time.monotonic() - started, 6)
+                assert ["submit_exit_plan"] in evidence.calls
+                assert len(gate.writes) == writes_before_plan, "Proposal tool must not place orders"
+                await engine.apply_plan(
+                    job["trade_id"], job["version"], job["lease"], Plan.model_validate(raw)
+                )
+                report["plan_applied_seconds"] = round(time.monotonic() - started, 6)
             report["planner_and_exit_seconds"] = round(time.monotonic() - started, 2)
             trade = store.trade(trade["id"])
             stop = await gate.get("/price_orders/" + trade["exits"]["sl"]["id"])

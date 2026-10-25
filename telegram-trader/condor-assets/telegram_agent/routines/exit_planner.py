@@ -6,6 +6,7 @@ import logging
 import os
 import runpy
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiohttp
@@ -19,7 +20,7 @@ class Config(BaseModel):
     pass
 
 
-async def request_plan(job, owner):
+async def request_plan(job, owner, cleanup_started):
     from condor.acp.client import PromptDone
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
     from condor.agents.agent import AgentStore
@@ -72,6 +73,7 @@ async def request_plan(job, owner):
             if isinstance(event, PromptDone):
                 reason = event.stop_reason
     finally:
+        cleanup_started.set()
         await client.stop()
     if reason != "end_turn":
         raise RuntimeError("Exit planner did not complete normally")
@@ -88,22 +90,34 @@ async def read_proposal(session, job):
         return await response.json()
 
 
+@asynccontextmanager
 async def generate_plan(job, owner):
-    task = asyncio.create_task(request_plan(job, owner))
+    cleanup_started = asyncio.Event()
+    task = asyncio.create_task(request_plan(job, owner, cleanup_started))
     try:
         async with aiohttp.ClientSession() as session, asyncio.timeout(90):
             while True:
                 await asyncio.wait({task}, timeout=0.25)
+                finished_before_read = task.done()
                 plan = await read_proposal(session, job)
                 if plan is not None:
-                    return plan  # final prose failure cannot discard an accepted tool proposal
-                if task.done():
+                    break  # final prose failure cannot discard an accepted tool proposal
+                if finished_before_read:
                     await task
                     raise ValueError("Model ended without a validated exit-plan tool call")
+        yield plan  # the caller applies the validated plan before model cleanup
     finally:
-        if not task.done():
+        if not task.done() and not cleanup_started.is_set() and not task.cancelling():
             task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        cleanup = asyncio.gather(task, return_exceptions=True)
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 async def run_worker():
@@ -128,18 +142,20 @@ async def run_worker():
                 if not job:
                     await asyncio.sleep(1)
                     continue
-                plan = await generate_plan(job, owner)
-                async with session.post(
-                    trader_url + "/plans",
-                    headers=trader_headers,
-                    json={
-                        "trade_id": job["trade_id"],
-                        "version": job["version"],
-                        "lease": job["lease"],
-                        "plan": plan,
-                    },
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
+                async with (
+                    generate_plan(job, owner) as plan,
+                    session.post(
+                        trader_url + "/plans",
+                        headers=trader_headers,
+                        json={
+                            "trade_id": job["trade_id"],
+                            "version": job["version"],
+                            "lease": job["lease"],
+                            "plan": plan,
+                        },
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response,
+                ):
                     response.raise_for_status()
             except asyncio.CancelledError:
                 raise

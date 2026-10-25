@@ -92,7 +92,7 @@ Stopping a Routine terminates that worker and its entire MCP process group.
 ## Safety and execution contract
 
 - Initial margin budget: 20% × (classic USDT futures balance + unrealised PnL).
-  Fixed isolated 7x. Contract counts round down; market slippage and fees mean
+  Fixed isolated 10x. Contract counts round down; market slippage and fees mean
   the actual margin debit need not exactly equal that budget.
 - Only model-interpreted explicit unconditional market/limit entries; no automatic
   channel breakout monitoring or add-ons. Manual chart-based conditional trading

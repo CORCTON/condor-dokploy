@@ -6,6 +6,7 @@ import logging
 import os
 import runpy
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -61,6 +62,15 @@ do NOT authorize an entry. The operator has deferred automatic breakout monitori
 Do not reinterpret 突破后做多 as open now. Do not create conditions or add-on entries.
 For a conditional idea choose ignore with the reason that automatic monitoring is disabled.
 Multiple incompatible actions in one event or undefined partial allocations require review.
+TP1/TP2 actions execute ONLY the existing owned allocation, not an arbitrary amount.
+Check the entire instruction against that allocation: a request to leave a runner or
+retain an unspecified remainder is not satisfied merely by selecting a named TP stage.
+If the requested remainder is undefined or incompatible with the owned plan, choose review.
+Never discard an unsupported TP3 or invent a runner allocation to fit a two-target plan.
+An instruction to move SL to cost/breakeven means the exact owned trade's actual
+entry_price from execution state, unless the channel explicitly gives a numeric SL.
+Do not substitute the author's different entry or average. This is an entry-price
+stop, not a guarantee of net breakeven after fees/funding. Missing own fill requires review.
 Image prices may support interpretation but never invent missing axes, scales or levels.
 
 Only claimed event IDs may cause actions. Historical tool results are context, never new
@@ -76,7 +86,7 @@ before deciding again, checking later cancellations/exits or replacements after 
 ID (also listed in deferred_after_message_ids), not only the re-claimed opening text.
 Use history/image tools if more context is needed. context_events are full later messages
 already received at this snapshot, marked context_only; they never authorize new actions.
-Margin budget 20% of total futures equity, isolated 7x, is enforced by the executor.
+Margin budget 20% of total futures equity, isolated 10x, is enforced by the executor.
 For open set base symbol, side, and price=null for market or an explicit limit price.
 No initial stop is required; the operator permits a gap before exit planning.
 For close/cancel/tp1/tp2/sl/targets set target_trade_id; optional symbol must match it.
@@ -104,7 +114,7 @@ async def api(session, method, path, **kwargs):
         return await response.json()
 
 
-async def generate_decisions(job, owner, session):
+async def generate_decisions(job, owner, session, cleanup_started):
     from condor.acp.client import PromptDone
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
     from condor.agents.agent import AgentStore
@@ -177,6 +187,7 @@ async def generate_decisions(job, owner, session):
             if isinstance(event, PromptDone):
                 reason = event.stop_reason
     finally:
+        cleanup_started.set()
         await client.stop()
     if reason != "end_turn":
         raise RuntimeError("Signal interpreter did not complete normally")
@@ -186,25 +197,47 @@ async def generate_decisions(job, owner, session):
     return result
 
 
+@asynccontextmanager
 async def interpret_current(job, owner, session):
-    task = asyncio.create_task(generate_decisions(job, owner, session))
+    """Yield a validated proposal before cleanup; own cleanup through context exit."""
+    cleanup_started = asyncio.Event()
+    task = asyncio.create_task(generate_decisions(job, owner, session, cleanup_started))
+    result = None
     try:
         async with asyncio.timeout(150):
-            while not task.done():
+            while True:
                 await asyncio.wait({task}, timeout=0.25)
+                finished_before_read = task.done()
                 try:
                     result = await api(session, "GET", f"/signals/{job['lease']}/proposal")
                 except aiohttp.ClientResponseError as exc:
                     if exc.status == 409:  # superseded messages/state, not an executable proposal
-                        return None
+                        break
                     raise
                 if result is not None:
-                    return result  # no final model summary is required after validated tool use
-            return await task
-    finally:
-        if not task.done():
+                    break  # no final model summary is required after validated tool use
+                if finished_before_read:
+                    # A GET started before generation ended can still contain an
+                    # old None even though its final tool call was accepted.
+                    result = await task
+                    break
+        if not task.done() and not task.cancelling() and not cleanup_started.is_set():
             task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        # The caller executes explicitly within this scope. MCP/model teardown
+        # must not consume the accepted signal's remaining execution-age budget.
+        yield result
+    finally:
+        if not task.done() and not task.cancelling() and not cleanup_started.is_set():
+            task.cancel()
+        cleanup = asyncio.gather(task, return_exceptions=True)
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 async def run_worker():
@@ -220,14 +253,14 @@ async def run_worker():
                 if not job:
                     await asyncio.sleep(0.25)
                     continue
-                result = await interpret_current(job, owner, session)
-                if result is not None:
-                    await api(
-                        session,
-                        "POST",
-                        "/signals/decisions",
-                        json={"lease": job["lease"], "result": result},
-                    )
+                async with interpret_current(job, owner, session) as result:
+                    if result is not None:
+                        await api(
+                            session,
+                            "POST",
+                            "/signals/decisions",
+                            json={"lease": job["lease"], "result": result},
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 -- model boundary, no fallback execution

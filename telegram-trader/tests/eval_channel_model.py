@@ -137,7 +137,7 @@ def owned(symbol, filled):
         "entry_terminal": bool(filled),
         "entry_id": "fixture-order-100",
         "entry_price": "10",
-        "lots": 14,
+        "lots": 20,
         "exits": {},
         "plan_needed": bool(filled),
         "margin_budget": "20",
@@ -183,15 +183,18 @@ async def case(module, name, texts, expected, trade=None, image=None):
     )
     started = time.monotonic()
     try:
-        async with aiohttp.ClientSession() as session:
-            result = await asyncio.wait_for(
-                module.interpret_current(job, int(os.environ["ADMIN_USER_ID"]), session), 150
-            )
+        async with (
+            aiohttp.ClientSession() as session,
+            module.interpret_current(job, int(os.environ["ADMIN_USER_ID"]), session) as result,
+        ):
+            proposal_ready_seconds = round(time.monotonic() - started, 6)
+            assert result is not None, "Analysis became stale before an accepted proposal"
         decisions = Decisions.model_validate(result)
         actual = [d.action for d in decisions.decisions]
         report = {
             "case": name,
             "seconds": round(time.monotonic() - started, 2),
+            "proposal_ready_seconds": proposal_ready_seconds,
             "expected": expected,
             "actual": actual,
             "tools": evidence.calls,
