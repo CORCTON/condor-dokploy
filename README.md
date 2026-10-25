@@ -61,16 +61,19 @@ The legacy parser is retained **only as canned executor test data**, not model-a
 
 The model calls `submit_signal_decisions` with typed arguments associated with exact
 event and owned-trade IDs; free-text JSON is never parsed as a channel decision.
-The tool stages a validated proposal only. After the model completes, the supervisor
-rechecks freshness before execution. MCP schema errors are returned to the model
+The tool stages an immutable validated proposal only. The supervisor consumes an
+accepted proposal without waiting for final prose, and rechecks freshness and the
+authoritative source messages before execution. MCP schema errors are returned to the model
 as tool errors; invalid arguments never become orders.
 The service validates them before Gate REST execution. A new message or changed
 trade state invalidates an in-flight analysis; all unhandled messages are interpreted
 together again. A timed-out model never authorizes a guessed order. History reads
 never enter the execution queue. Channel context tools cannot send messages, trade,
 access another channel or retrieve secrets. Images have an explicit 8 MiB transport
-limit; message text is never silently truncated. Analysis batches are paginated at
-50 events/four media items; unread backlog blocks new entries, not order reconciliation.
+limit; message text is never silently truncated. Analysis batches contain at most
+50 events. The first four images are attached; all remaining images stay available
+through the image tool. Unread backlog defers entries until reanalysis with the full
+received context, without resetting the original 60-second entry deadline.
 
 `exit_planner` fills TP/SL parameters asynchronously after a confirmed fill. Its
 only tool, `submit_exit_plan`, stages typed parameters for the assigned trade,
@@ -82,9 +85,9 @@ The admin's Telegram chat is bound to TelegramAgent on startup, and both continu
 Routines are bootstrapped through the official Routine API. Chat history and source
 channel history are distinct; no ability to query history should be assumed outside
 the signal interpreter's explicitly mounted read-only tools.
-The signal Routine supervises its own worker process: Condor's per-process API
-semaphore must not let an exit-plan or chat request block an urgent channel update.
-Stopping the Routine terminates that worker and its MCP process group.
+Each continuous Routine supervises its own worker process: Condor's per-process API
+semaphore must not let an operator chat block a channel update or exit plan.
+Stopping a Routine terminates that worker and its entire MCP process group.
 
 ## Safety and execution contract
 
@@ -104,6 +107,8 @@ Stopping the Routine terminates that worker and its MCP process group.
   version-, direction- and tick-checked. Channel numeric levels take precedence.
 - Native reduce-only TP limits and full-position mark-price SL triggers.
   Trigger expiry is renewed before expiry; it is **not** a position timeout.
+  Renewal preserves the previous stop reference until its replacement is confirmed.
+  Uncertain stop writes require exact receipt reconciliation, never blind retries.
 - Acknowledgement is not a fill. Partial fills/reductions are reconciled.
   Remaining entry orders are cancelled when exits start. Every exchange write
   has a durable intent; ambiguous timeouts pause new entries and are never
@@ -117,8 +122,10 @@ Stopping the Routine terminates that worker and its MCP process group.
   and undefined partial allocations are not guessed. Model accuracy is not 100%.
 - Channel messages older than 60 seconds and queued/replayed entries after a
   restart are still interpreted but are not auto-opened. This freshness guard is separate from position
-  holding time. Offline missed instructions require review; no history catch-up
-  opens. The dedicated account must not be concurrently traded by other bots.
+  holding time. Recovered management instructions are reinterpreted against current
+  channel context and owned state; historical entries never open. Previously completed
+  or reviewed events are not automatically replayed. The dedicated account must not
+  be concurrently traded by other bots.
 - Private API port is internal only and token-authenticated. There is no free-form
   order endpoint. A decision submission requires a current durable analysis
   lease and complete event coverage; it is not a free-form order endpoint.
