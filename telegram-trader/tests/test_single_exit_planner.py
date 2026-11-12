@@ -54,7 +54,7 @@ async def test_single_target_tool_uses_supplied_schema_without_partial_target_fi
 
     listed = await tools.list_tools()
     assert [tool.name for tool in listed] == ["submit_exit_plan"]
-    assert listed[0].inputSchema == schema
+    assert listed[0].input_schema == schema
     assert "TP1" not in listed[0].description
     assert "single full-position TP" in listed[0].description
     assert await tools.execute_tool("submit_exit_plan", plan) == {"accepted": True}

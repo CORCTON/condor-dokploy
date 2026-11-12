@@ -44,13 +44,13 @@ async def test_stdio_tools_read_only_complete_history_and_image(monkeypatch):
                     "read_execution_state",
                 }
                 history = await session.call_tool("read_channel_history", {"limit": 2})
-                assert not history.isError
+                assert not history.is_error
                 assert "A" * 5000 in history.content[0].text
                 image = await session.call_tool("view_channel_image", {"message_id": 3})
-                assert not image.isError
-                assert any(c.type == "image" and c.mimeType == "image/png" for c in image.content)
+                assert not image.is_error
+                assert any(c.type == "image" and c.mime_type == "image/png" for c in image.content)
                 denied = await session.call_tool("read_channel_message", {"message_id": -1})
-                assert denied.isError
+                assert denied.is_error
                 assert not store.trades() and not store.queued()
     finally:
         store.close()
@@ -93,9 +93,9 @@ async def test_typed_proposal_tool_rejects_bad_fields_without_exchange_writes(mo
                 bad = await session.call_tool(
                     "submit_signal_decisions", {"decisions": [dict(decision, **{" levels": {}})]}
                 )
-                assert bad.isError and inbox.proposal(job["lease"]) is None
+                assert bad.is_error and inbox.proposal(job["lease"]) is None
                 good = await session.call_tool("submit_signal_decisions", {"decisions": [decision]})
-                assert not good.isError and inbox.proposal(job["lease"]) is not None
+                assert not good.is_error and inbox.proposal(job["lease"]) is not None
                 assert (
                     not store.trades()
                     and store.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 0
@@ -104,7 +104,7 @@ async def test_typed_proposal_tool_rejects_bad_fields_without_exchange_writes(mo
                 stale = await session.call_tool(
                     "submit_signal_decisions", {"decisions": [decision]}
                 )
-                assert stale.isError
+                assert stale.is_error
     finally:
         store.close()
 
@@ -143,17 +143,17 @@ async def test_exit_plan_tool_only_stages_valid_fresh_arguments(monkeypatch):
                 }
                 values = plan().model_dump(mode="json")
                 bad = await session.call_tool("submit_exit_plan", {**values, " sl": "11"})
-                assert bad.isError and engine.plan_proposal(*args) is None
+                assert bad.is_error and engine.plan_proposal(*args) is None
                 bad = await session.call_tool("submit_exit_plan", {**values, "sl": "9"})
-                assert bad.isError and engine.plan_proposal(*args) is None
+                assert bad.is_error and engine.plan_proposal(*args) is None
                 bad = await session.call_tool("submit_exit_plan", {**values, "sl": "11.001"})
-                assert bad.isError and engine.plan_proposal(*args) is None
+                assert bad.is_error and engine.plan_proposal(*args) is None
                 good = await session.call_tool("submit_exit_plan", values)
-                assert not good.isError and engine.plan_proposal(*args) == values
+                assert not good.is_error and engine.plan_proposal(*args) == values
                 assert len(exchange.writes) == writes
                 await signal((store, exchange, engine), "SL 放在10.50", message=2, reply=1)
                 writes = len(exchange.writes)
                 stale = await session.call_tool("submit_exit_plan", values)
-                assert stale.isError and len(exchange.writes) == writes
+                assert stale.is_error and len(exchange.writes) == writes
     finally:
         store.close()
