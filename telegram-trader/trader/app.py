@@ -79,6 +79,10 @@ def business_readiness(engine, credentials=None):
             reasons.append("position_reconciliation_failed")
         if engine._entry_blockers:
             reasons.append("dependency_unavailable")
+        if engine.store.get("paused", True) and engine.pause_reason() not in {
+            "activation required", "initial activation required", "operator requested pause",
+        }:
+            reasons.append("execution_safety_pause")
     return {
         "ready": not reasons,
         "state": "disabled" if not engine.enabled else ("degraded" if reasons else "ready"),

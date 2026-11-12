@@ -564,6 +564,14 @@ class Engine:
                     await self.close_trade(trade)
                 return True
             if result.get("finish_as") != "expired":
+                # Gate can auto-cancel protection after an App close between
+                # the earlier position read and this stop receipt. Revalidate
+                # ownership/size before declaring a protection failure.
+                position = await self.owned_position(trade)
+                trade["position_size"] = int(abs(D(position["size"])))
+                if not trade["position_size"]:
+                    self.store.save_trade(trade)
+                    return True  # normal reconciliation still confirms closure twice
                 raise Review("native stop no longer active; protection unavailable")
             await self.renew_stop(trade)
         elif time.time() - sl["created"] > 82800:
@@ -822,7 +830,7 @@ class Engine:
         return plan
 
     async def fail_plan(self, trade_id, version, lease, error):
-        """Release only a failed, unproposed job; never retry an exchange operation."""
+        """Fence a failed unstarted job; preserve its accepted proposal for recovery."""
         async with self.lock:
             trade = self.store.trade(trade_id)
             if (
@@ -841,11 +849,12 @@ class Engine:
                 )
                 trade["plan_error"] = error
             # apply_plan holds this lock and persists plan before any exit write.
-            # An accepted proposal must remain immutable even if its HTTP reply
-            # was lost. Only a job that reached neither stage can be regenerated.
+            # An accepted proposal remains immutable across a lost HTTP reply.
+            # Release only the old lease, not that proposal; the next claimant
+            # applies the saved plan without another model call or a 120s wait.
+            # Started/uncertain exchange writes retain their existing recovery.
             released = (
-                trade.get("plan_proposal") is None
-                and trade.get("plan") is None
+                trade.get("plan") is None
                 and not self.store.unknowns()
             )
             if released:

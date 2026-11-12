@@ -162,16 +162,19 @@ async def test_candle_failure_preserves_accepted_proposal_or_uncertain_operation
     with pytest.raises(ClientError):
         await engine.claim_plan()
     current = store.trade(trade["id"])
-    assert current["plan_token"] == guarded["plan_token"]
-    assert current["plan_lease"] == guarded["plan_lease"]
     assert current["plan_needed"] and current["plan"] is None
     assert current.get("plan_proposal") == guarded.get("plan_proposal")
     if guard == "accepted_proposal":
+        assert current["plan_token"] is None and current["plan_lease"] == 0
         assert current["plan_proposal"] is not None
+        recovered = await engine.claim_plan()
+        assert recovered["accepted_plan"] == current["plan_proposal"]
+        assert recovered["lease"] != guarded["plan_token"]
         assert not store.unknowns()
     else:
+        assert current["plan_token"] == guarded["plan_token"]
+        assert current["plan_lease"] == guarded["plan_lease"]
         assert store.operation("uncertain-protection")["status"] == "unknown"
         assert engine.paused()
     assert await engine.claim_plan() is None
     assert len(exchange.writes) == before
-

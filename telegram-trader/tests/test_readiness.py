@@ -79,6 +79,33 @@ async def test_operator_pause_is_healthy_and_explicit(rig):
         assert body["state"] == "ready"
 
 
+@pytest.mark.parametrize("reason", [
+    "reconciliation blocked: native stop no longer active; protection unavailable",
+    "exchange write outcome unknown",
+    "position ownership/mode mismatch",
+])
+async def test_latched_fault_is_degraded_even_after_trade_closed(rig, reason):
+    store, exchange, engine, credentials = rig
+    engine.pause(reason)
+    before = store.db.total_changes
+    async with TestClient(TestServer(make_app(engine, credentials=credentials))) as client:
+        response = await client.get("/ready", headers={"Authorization": "Bearer fixture"})
+        body = await response.json()
+        assert response.status == 503
+        assert body["reasons"] == ["execution_safety_pause"]
+        assert not body["ready"] and body["paused"]
+        assert (await client.get("/health")).status == 200
+    assert store.db.total_changes == before and not exchange.writes
+
+
+@pytest.mark.parametrize("reason", ["initial activation required", "activation required"])
+def test_initial_activation_is_not_a_fault(rig, reason):
+    _, _, engine, credentials = rig
+    engine.pause(reason)
+    result = business_readiness(engine, credentials)
+    assert result["ready"] and result["paused"]
+
+
 @pytest.mark.parametrize("fault,reason", [
     ("credentials", "configuration_missing"),
     ("configuration", "configuration_missing"),

@@ -3,13 +3,16 @@
 import asyncio
 import copy
 import time
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from test_exit_planner import planner as planner  # noqa: PLC0414
 from test_trader import Exchange, plan, signal
 
 from trader.app import make_app
-from trader.engine import Engine
+from trader.engine import Engine, Review
 from trader.store import Store
 
 
@@ -85,24 +88,94 @@ async def test_failure_does_not_release_an_unsafe_or_different_job(planned_job, 
     assert engine.gate.writes == before
 
 
-async def test_failure_keeps_an_accepted_proposal_and_its_original_lease(planned_job):
+async def test_failure_releases_accepted_unstarted_proposal_without_replanning(planned_job):
     engine, job = planned_job
     await engine.propose_plan(job["trade_id"], job["version"], job["lease"], plan())
     before = engine.store.trade(job["trade_id"])
     writes = copy.deepcopy(engine.gate.writes)
-    for _ in range(2):
-        assert not await engine.fail_plan(
-            job["trade_id"], job["version"], job["lease"], "LostProposalResponse"
-        )
+    assert await engine.fail_plan(
+        job["trade_id"], job["version"], job["lease"], "LostProposalResponse"
+    )
+    assert not await engine.fail_plan(
+        job["trade_id"], job["version"], job["lease"], "LostProposalResponse"
+    )
     current = engine.store.trade(job["trade_id"])
     assert current["plan_proposal"] == before["plan_proposal"]
-    assert current["plan_token"] == before["plan_token"]
-    assert current["plan_lease"] == before["plan_lease"]
-    assert await engine.claim_plan() is None
+    assert current["plan_token"] is None and current["plan_lease"] == 0
     assert engine.gate.writes == writes
-    assert engine.plan_proposal(job["trade_id"], job["version"], job["lease"]) == before[
-        "plan_proposal"
-    ]
+    with pytest.raises(Review, match="stale"):
+        await engine.apply_plan(job["trade_id"], job["version"], job["lease"], plan())
+    recovered = await engine.claim_plan()
+    assert recovered["lease"] != job["lease"]
+    assert recovered["accepted_plan"] == before["plan_proposal"]
+    await engine.apply_plan(recovered["trade_id"], recovered["version"], recovered["lease"], plan())
+    assert not engine.store.trade(job["trade_id"])["plan_needed"]
+    assert len(engine.gate.stops) == 1 and len(engine.gate.orders) == 2
+
+
+async def test_accepted_proposal_with_unknown_write_cannot_release_lease(planned_job):
+    engine, job = planned_job
+    await engine.propose_plan(job["trade_id"], job["version"], job["lease"], plan())
+    engine.store.intent("unknown", job["trade_id"], "POST", "/price_orders", {})
+    assert not await engine.fail_plan(
+        job["trade_id"], job["version"], job["lease"], "LostProposalResponse"
+    )
+    current = engine.store.trade(job["trade_id"])
+    assert current["plan_token"] == job["lease"] and current["plan_lease"] > time.time()
+    assert await engine.claim_plan() is None
+
+
+async def test_worker_recovers_proposal_read_timeout_through_http_without_model_retry(
+    planned_job, planner, monkeypatch
+):
+    engine, initial = planned_job
+    # Return the fixture's initial unused claim, then exercise the real worker
+    # and service routes; only generation and the dropped read are synthetic.
+    await engine.fail_plan(initial["trade_id"], initial["version"], initial["lease"], "fixture")
+    monkeypatch.setenv("ADMIN_USER_ID", "1")
+    monkeypatch.setenv("TRADER_LLM_READY", "true")
+    accepted, applied = asyncio.Event(), asyncio.Event()
+    generations = 0
+    headers = {"Authorization": "Bearer plan-recovery-only"}
+
+    async def generate(job, owner, cleanup_started):
+        nonlocal generations
+        generations += 1
+        payload = {key: job[key] for key in ("trade_id", "version", "lease")}
+        response = await client.post("/plans/proposals", headers=headers,
+                                     json={**payload, "plan": plan().model_dump(mode="json")})
+        assert response.status == 200
+        accepted.set()
+        cleanup_started.set()
+
+    async def dropped_read(*_args):
+        await accepted.wait()
+        raise TimeoutError("synthetic lost internal proposal read")
+
+    @asynccontextmanager
+    async def heartbeat(*_args):
+        yield
+
+    async def no_delay(_seconds):
+        if not engine.store.trade(initial["trade_id"])["plan_needed"]:
+            applied.set()
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(planner, "request_plan", generate)
+    monkeypatch.setattr(planner, "read_proposal", dropped_read)
+    monkeypatch.setitem(planner.runtime, "worker_heartbeat", heartbeat)
+    # Patch this worker's namespace, not asyncio shared by the HTTP service.
+    monkeypatch.setattr(planner, "asyncio", SimpleNamespace(
+        **{k: getattr(asyncio, k) for k in ("Event", "create_task", "timeout", "wait", "CancelledError")},
+        sleep=no_delay,
+    ))
+    async with TestClient(TestServer(make_app(engine))) as client:
+        monkeypatch.setenv("TELEGRAM_TRADER_URL", str(client.make_url("/")).rstrip("/"))
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(planner.run_worker(), 3)
+    assert applied.is_set() and generations == 1
+    assert len(engine.gate.stops) == 1 and len(engine.gate.orders) == 2
+    assert not engine.store.unknowns() and not engine.paused()
 
 
 async def test_failure_waits_for_inflight_apply_and_never_releases_or_replays_it(
