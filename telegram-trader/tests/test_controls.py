@@ -192,7 +192,7 @@ async def test_successful_reconciliation_clears_transient_blocker_but_does_not_r
     trade["last_error"] = "TimeoutError"
     store.save_trade(trade)
     engine.pause("reconciliation requires review")
-    with pytest.raises(Review, match="核查"):
+    with pytest.raises(Review, match="对账尚未恢复"):
         await engine.resume()
     await engine.poll()
     assert not store.trade(trade["id"]).get("last_error")
@@ -223,8 +223,8 @@ async def test_status_exposes_rejected_signal_even_with_healthy_heartbeat(contro
         response = await client.get("/status", headers={"Authorization": "Bearer fixture"})
         state = await response.json()
         assert state["listener_ready"]
-        assert state["last_review"]["message_id"] == 15368
-        assert state["last_review"]["reason"] == "fixture rejection"
+        assert state["last_issue"]["message_id"] == 15368
+        assert state["last_issue"]["reason"] == "fixture rejection"
 
 
 def routine(monkeypatch):

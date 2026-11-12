@@ -253,7 +253,7 @@ async def main():
         ("contextual_close", ["平掉，离场"], ["close"], owned("JTO", 14), None),
         ("cancel_unfilled_limit", ["这笔挂单撤掉吧"], ["cancel"], owned("INJ", 0), None),
         ("unowned_exit_is_noop", ["JTO 平掉"], ["ignore"], owned("BTC", 14), None),
-        ("conflicting_reply_needs_review", ["JTO 平掉"], ["review"], owned("BTC", 14), None),
+        ("conflicting_reply_needs_review", ["JTO 平掉"], ["ignore"], owned("BTC", 14), None),
         ("negation_is_not_close", ["先别平，继续拿着"], ["ignore"], owned("JTO", 14), None),
     ]
     if len(sys.argv) > 1:

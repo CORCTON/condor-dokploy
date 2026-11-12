@@ -111,7 +111,7 @@ async def test_edit_never_renews_original_age_or_overrides_entry_eligibility(inb
     elif guard == "restart":
         inbox.store.recover_analysis()
     await decide(inbox)
-    assert event_result(inbox, event_id)["status"] == "review"
+    assert event_result(inbox, event_id)["status"] == "error"
     assert not inbox.engine.gate.writes and not inbox.store.trades()
     if guard == "old":
         assert "older than 60 seconds" in event_result(inbox, event_id)["detail"]
@@ -157,7 +157,7 @@ async def test_revision_cannot_resubmit_existing_entry_in_any_terminal_or_uncert
     before = deepcopy(exchange.orders), deepcopy(exchange.positions), deepcopy(exchange.writes)
     event_id = receive(inbox, text=f"#{symbol} 當前價格入場一筆多單", edited=True)
     await decide(inbox, symbol=symbol, side="long")
-    assert event_result(inbox, event_id)["status"] == "review"
+    assert event_result(inbox, event_id)["status"] == "error"
     assert (exchange.orders, exchange.positions, exchange.writes) == before
     assert len(inbox.store.trades()) == 1
 
@@ -171,7 +171,7 @@ async def test_prior_durable_entry_intent_blocks_revision_even_without_trade_row
         inbox.store.result(trade_id + ":entry", {"id": "prior-entry"}, status)
     event_id = receive(inbox, edited=True)
     await decide(inbox)
-    assert event_result(inbox, event_id)["status"] == "review"
+    assert event_result(inbox, event_id)["status"] == "error"
     assert not inbox.engine.gate.writes and not inbox.store.trades()
     assert inbox.store.operation(trade_id + ":entry")["status"] == status
 
@@ -207,7 +207,7 @@ async def test_edit_arriving_during_entry_checks_requires_new_decision_before_or
         # a confirmed leverage intent. This narrow race stays a safe refusal;
         # changing that write protocol is outside the first-entry edit fix.
         row = event_result(inbox, job["events"][0]["event_id"])
-        assert row["status"] == "review"
+        assert row["status"] == "error"
         assert "operation key reused with different intent" in row["detail"]
         assert not exchange.orders
         assert len(exchange.writes) == 1
@@ -241,5 +241,5 @@ async def test_fresh_edit_does_not_override_previously_recorded_rejected_trade(i
     event_id = receive(inbox, edited=True)
     before = deepcopy(inbox.engine.gate.writes)
     await decide(inbox)
-    assert event_result(inbox, event_id)["status"] == "review"
+    assert event_result(inbox, event_id)["status"] == "error"
     assert inbox.engine.gate.writes == before and not inbox.engine.gate.orders

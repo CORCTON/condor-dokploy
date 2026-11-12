@@ -4,7 +4,7 @@ import json
 import time
 import uuid
 
-from .engine import Reanalyze, Review
+from .engine import EXIT_POLICY, Reanalyze, Review
 from .models import Decisions
 
 
@@ -35,28 +35,41 @@ class SignalInbox:
             )
         )
 
-    async def claim(self):
+    async def claim(self, request_id=None):
         async with self.engine.lock:
             if not self.engine.listener_ready:
                 return None
-            for old in self.store.db.execute(
-                "SELECT id FROM analyses WHERE status='analyzing'"
-            ).fetchall():
-                if self.fresh(old["id"]):
+            previous = self.store.analysis(request_id) if request_id else None
+            if previous:
+                if not self.fresh(request_id):
+                    self.store.release_analysis(request_id)
                     return None
-                self.store.release_analysis(old["id"])
-            rows = self.store.queued()
-            if not rows:
-                with self.store.db:
-                    self.store.db.execute("UPDATE events SET status='queued' WHERE status='deferred'")
+                # Recover the original lease after a lost HTTP response. Do not
+                # extend it or substitute a newer event/state under the same ID.
+                ids = json.loads(previous["event_ids"])
+                rows = [self.store.db.execute("SELECT * FROM events WHERE id=?", (event_id,))
+                        .fetchone() for event_id in ids]
+                lease, channel, watermark = request_id, previous["channel"], previous["watermark"]
+            else:
+                for old in self.store.db.execute(
+                    "SELECT id FROM analyses WHERE status='analyzing'"
+                ).fetchall():
+                    if self.fresh(old["id"]):
+                        return None
+                    self.store.release_analysis(old["id"])
                 rows = self.store.queued()
-            if not rows:
-                return None
-            channel = rows[0]["channel"]
-            rows = [row for row in rows if row["channel"] == channel][:50]
-            lease = uuid.uuid4().hex
-            ids = [r["id"] for r in rows]
-            watermark = self.store.watermark(channel)
+                if not rows:
+                    with self.store.db:
+                        self.store.db.execute(
+                            "UPDATE events SET status='queued' WHERE status='deferred'")
+                    rows = self.store.queued()
+                if not rows:
+                    return None
+                channel = rows[0]["channel"]
+                rows = [row for row in rows if row["channel"] == channel][:50]
+                lease = request_id or uuid.uuid4().hex
+                ids = [r["id"] for r in rows]
+                watermark = self.store.watermark(channel)
             contextual = [
                 r for r in rows
                 if any(json.loads(r["payload"]).get(k) for k in ("backlog_deferred", "context_recovered"))
@@ -79,20 +92,21 @@ class SignalInbox:
                     ).fetchall()
                     if r["id"] not in ids
                 ]
-            with self.store.db:
-                self.store.db.execute(
-                    "INSERT INTO analyses VALUES (?,?,?,?,?,'analyzing',?,NULL)",
-                    (
-                        lease,
-                        channel,
-                        watermark,
-                        json.dumps(ids),
-                        self.trade_state(),
-                        time.time() + 180,
-                    ),
-                )
-                for event_id in ids:
-                    self.store.finish(event_id, "analyzing")
+            if not previous:
+                with self.store.db:
+                    self.store.db.execute(
+                        "INSERT INTO analyses VALUES (?,?,?,?,?,'analyzing',?,NULL)",
+                        (
+                            lease,
+                            channel,
+                            watermark,
+                            json.dumps(ids),
+                            self.trade_state(),
+                            time.time() + 180,
+                        ),
+                    )
+                    for event_id in ids:
+                        self.store.finish(event_id, "analyzing")
             return {
                 "lease": lease,
                 "channel_id": channel,
@@ -107,6 +121,7 @@ class SignalInbox:
                 ],
                 "trades": self.engine.active(),
                 "execution_enabled": self.engine.enabled,
+                "entry_exit_policy": EXIT_POLICY,
                 "new_entries_paused": self.engine.paused(),
                 "context_events": context,
                 "deferred_after_message_ids": [r["message"] for r in contextual],
@@ -155,7 +170,7 @@ class SignalInbox:
                 except Exception:
                     self.engine.pause("unexpected model decision execution failure")
                     self.store.finish(
-                        event_id, "review", "execution failed; inspect durable intents"
+                        event_id, "error", "execution failed; inspect durable intents"
                     )
                     raise
             with self.store.db:
@@ -168,7 +183,7 @@ class SignalInbox:
             raise Review("model must decide exactly once for every claimed event")
         active = {t["id"]: t for t in self.engine.active()}
         for decision in decisions.decisions:
-            if decision.action not in {"open", "ignore", "review"}:
+            if decision.action not in {"open", "ignore"}:
                 trade = active.get(decision.target_trade_id)
                 if not trade or trade["channel"] != job["channel"]:
                     raise Review("management requires an exact owned trade from this channel")

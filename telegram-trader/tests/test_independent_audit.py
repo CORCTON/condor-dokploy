@@ -4,7 +4,6 @@ import datetime
 import time
 from types import SimpleNamespace
 
-import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from test_trader import plan, signal
 from test_trader import rig as rig  # noqa: PLC0414 -- re-export the pytest fixture
@@ -35,16 +34,18 @@ def pending_tp_size(exchange):
     )
 
 
-async def test_later_fills_create_originally_zero_sized_tp_allocation(rig):
+async def test_later_fills_resize_single_contract_target_to_full_owned_quantity(rig):
     store, exchange, engine = rig
     trade = await partial_limit_with_plan(rig, 1)
-    assert "tp1" not in trade["exits"]
+    assert trade["exits"]["tp"]["size"] == 1
+    target_id = trade["exits"]["tp"]["id"]
     exchange.orders[trade["entry_id"]].update(left=0, status="finished")
     exchange.position["size"] = -trade["lots"]
     await engine.poll()
     current = store.trade(trade["id"])
     assert current["filled"] == trade["lots"]
-    assert "tp1" in current["exits"]
+    assert current["exits"]["tp"]["id"] == target_id
+    assert current["exits"]["tp"]["size"] == trade["lots"]
     assert pending_tp_size(exchange) == abs(exchange.position["size"])
 
 
@@ -82,14 +83,13 @@ async def test_source_edit_not_yet_pushed_is_rechecked_before_an_entry(rig, monk
     assert not exchange.orders
 
 
-@pytest.mark.parametrize("completed", [("tp1",), ("tp1", "tp2")])
 async def test_native_tp_cancellation_race_does_not_orphan_later_entry_fill(
-    rig, monkeypatch, completed
+    rig, monkeypatch
 ):
     store, exchange, engine = rig
     trade = await partial_limit_with_plan(rig, 4)
     entry = exchange.orders[trade["entry_id"]]
-    for name in completed:
+    for name in ("tp",):
         order = exchange.orders[trade["exits"][name]["id"]]
         exchange.position["size"] += abs(order["left"])
         order.update(left=0, status="finished")
@@ -126,16 +126,18 @@ async def test_partial_market_tp_crash_before_next_intent_preserves_remaining_al
     original = engine.write
 
     async def crash_before_intent(trade, key, *args, **kwargs):
-        if key.endswith(":tp1:take-now:1"):
+        if key.endswith(":close:1"):
             raise RuntimeError("injected crash after take progress commit, before new intent")
         return await original(trade, key, *args, **kwargs)
 
     monkeypatch.setattr(engine, "write", crash_before_intent)
     await engine.poll()
-    assert exchange.position["size"] == -11  # only 3 of TP1's 7 contracts filled
+    assert exchange.position["size"] == -11  # only 3 of 14 contracts filled
     exchange.partial = None
     restarted = Engine(store, exchange, enabled=True)
-    await restarted.poll()
-    await restarted.poll()
-    assert exchange.position["size"] == -7  # resume only the remaining 4, never all 7 again
-    assert store.trade(trade["id"])["exits"]["tp1"]["take_filled"] == 7
+    for _ in range(4):
+        await restarted.poll()
+    assert exchange.position["size"] == 0  # resume only the remaining 11 contracts
+    assert store.trade(trade["id"])["status"] == "closed"
+    reductions = [o for o in exchange.orders.values() if o["price"] == "0" and o["reduce_only"]]
+    assert sum(abs(o["size"]) - o["left"] for o in reductions) == 14

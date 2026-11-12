@@ -33,7 +33,7 @@ class PromptDone:
         self.stop_reason = reason
 
 
-PLAN = {"sl": "11", "tp1": "9", "tp2": "8", "tp1_fraction": "0.5", "rationale": "fixture"}
+PLAN = {"sl": "11", "tp": "8", "rationale": "fixture"}
 JOB = {"trade_id": "trade", "version": 1, "lease": "lease", "output_schema": {}}
 
 
@@ -251,7 +251,7 @@ async def test_worker_applies_native_exits_before_waiting_for_slow_model_cleanup
             await asyncio.wait_for(applied.wait(), 2)
             await asyncio.wait_for(cleanup_started.wait(), 2)
             assert not cleanup_done.is_set() and not worker.done()
-            assert len(exchange.stops) == 1 and len(exchange.orders) == 3
+            assert len(exchange.stops) == 1 and len(exchange.orders) == 2
             assert not store.trade(trade["id"])["plan_needed"]
             assert model_starts == 1
             cleanup_release.set()

@@ -26,7 +26,7 @@ CASES = [
     case(
         "real_two_month_EIGEN_EDGE_conflict_two_positions",
         [15284],
-        [decision("review")],
+        [decision("ignore")],
         [
             dict(trade("EIGEN", "long", 15281), entry="0.2778", tick="0.0001"),
             dict(trade("EDGE", "long", 15037), alias="B", entry="0.71", tick="0.0001"),
@@ -39,7 +39,7 @@ CASES = [
     case(
         "real_two_month_PUMP_unsupported_addon_then_independent_SL",
         [15224, 15225],
-        [decision("review"), decision(["sl", "targets"], target="A", sl="0.00485")],
+        [decision("ignore"), decision(["sl", "targets"], target="A", sl="0.00485")],
         [dict(trade("PUMP", "long", 15221), entry="0.005198", tick="0.000001")],
         fixture_note=(
             "The add-on is unsupported, but its later reply contains an independent exact SL "
@@ -62,7 +62,7 @@ CASES = [
     case(
         "real_two_month_FIL_old_reply_must_not_close_new_trade",
         [15375],
-        [decision(["ignore", "review"])],
+        [decision(["ignore"])],
         [dict(trade("FIL", "long", 15370), entry="1.01", tick="0.0001")],
         fixture_note=(
             "15370 is ONLY a synthetic later-trade identity marker; the real post is a market "
@@ -73,12 +73,12 @@ CASES = [
     case(
         "real_two_month_INJ_TP1_keeps_unrelated_HYPE_unchanged",
         [15319],
-        [decision("tp1", target="A")],
+        [decision("close", target="A")],
         [
             trade("INJ", "short", 15317),
             dict(trade("HYPE", "long", 14956), alias="B", entry="81.788", tick="0.001"),
         ],
-        fixture_note="The symbol-less TP1 reply must affect INJ only, using its existing allocation.",
+        fixture_note="The symbol-less immediate TP1 reply must fully close INJ only, preserving HYPE.",
     ),
     case(
         "real_two_month_ETH_cancel_preserves_partial_fill_and_exits",
@@ -101,7 +101,7 @@ CASES = [
     case(
         "real_two_month_HYPE_reduce_and_breakeven_compound",
         [14960],
-        [decision("review")],
+        [decision("ignore")],
         [dict(trade("HYPE", "long", 14956), entry="81.788", tick="0.001", market_after="83")],
         fixture_note=(
             "Heavy-position users should reduce once AND set cost SL. Reduction size is undefined; "
@@ -123,9 +123,9 @@ CASES = [
     case(
         "real_two_month_JUP_three_targets_not_silently_truncated",
         [15275],
-        [decision("review")],
+        [decision("ignore")],
         [dict(trade("JUP", "short", 15272), entry="0.3738", tick="0.0001")],
-        fixture_note="Three source targets0.3645/0.3600/0.3555 cannot be collapsed to a two-TP plan.",
+        fixture_note="Three source targets0.3645/0.3600/0.3555 cannot be collapsed to the single-TP plan.",
     ),
     case(
         "real_two_month_FOLKS_conditional_profit_exit_without_position",
@@ -142,7 +142,7 @@ CASES = [
     case(
         "real_two_month_CRCL_right_side_setup_not_market_repeat_1",
         [14959],
-        [decision(["ignore", "review"])],
+        [decision(["ignore"])],
         fixture_note=(
             "Independently inspected original chart: price sits in a descending-triangle setup; "
             "a red circle/arrow projects a move through horizontal support. No explicit current "
@@ -154,7 +154,7 @@ CASES = [
     case(
         "real_two_month_CRCL_right_side_setup_not_market_repeat_2",
         [14959],
-        [decision(["ignore", "review"])],
+        [decision(["ignore"])],
         fixture_note=(
             "Independent identical-source repeat, with a fresh empty simulated account. "
             "The arrow visualizes a bearish scenario, not proof of an unconditional market short. "

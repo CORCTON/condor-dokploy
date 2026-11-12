@@ -82,16 +82,17 @@ async def seed(engine, exchange, fixture):
         direction = 1 if trade["side"] == "long" else -1
         def level(factor):
             return (entry * D(str(factor)) // tick) * tick
-        plan = Plan(sl=level(1 - direction * .1), tp1=level(1 + direction * .1),
-                    tp2=level(1 + direction * .2), tp1_fraction="0.5", rationale="fixed test setup")
+        plan = Plan(sl=level(1 - direction * .1), tp=level(1 + direction * .2), rationale="fixed test setup")
         args = job["trade_id"], job["version"], job["lease"], plan
         await engine.propose_plan(*args)
         await engine.apply_plan(*args)
     trade = store.trade(trade["id"])
-    if fixture.get("tp1_done"):
-        order = exchange.orders[trade["exits"]["tp1"]["id"]]
+    if fixture.get("tp_done"):
+        order = exchange.orders[trade["exits"]["tp"]["id"]]
         exchange.fill(order["id"], price=order["price"])
-        await engine.poll()
+        for _ in range(3):
+            await engine.poll()
+        assert store.trade(trade["id"])["status"] == "closed"
     if fixture.get("market_after"):
         exchange.set_market(symbol, price=fixture["market_after"])
     return store.trade(trade["id"])
@@ -109,7 +110,7 @@ def assert_decision(actual, expected, aliases, messages):
         assert (actual.price is None if expected["price"] is None
                 else actual.price is not None and D(actual.price) == D(expected["price"]))
     target = expected.get("target")
-    if actual.action not in {"ignore", "review"}:
+    if actual.action not in {"ignore"}:
         target = target or expected.get("target_if_action")
     if target:
         assert actual.target_trade_id == aliases[target]["id"]
@@ -129,24 +130,23 @@ def assert_effects(spec, decisions, before, after, aliases, engine, exchange, ev
     affected = set()
     for expected, actual, row in zip(spec["expected"], decisions, event_rows, strict=True):
         if spec.get("execution_review"):
-            assert row["status"] == (actual.action if actual.action in {"ignore", "review"} else "review")
+            assert row["status"] == (actual.action if actual.action in {"ignore", "error"} else "error")
             assert row["detail"], "Guard must explain why execution was blocked"
-            if actual.action not in {"ignore", "review"}:
+            if actual.action not in {"ignore"}:
                 guard_reason = {
                     "derived_old_entry_age_guard": "entry signal older than 60 seconds",
-                    "derived_TP1_no_plan": "TP allocation not established yet",
                     "derived_opposite_entry_without_close": "same-symbol trade already active",
                 }[spec["name"]]
                 assert guard_reason in row["detail"], row
-        elif actual.action in {"ignore", "review"}:
+        elif actual.action in {"ignore"}:
             assert row["status"] == actual.action
         else:
             assert row["status"] == "done", row
-        if expected["action"] in ("ignore", "review") or (
-            isinstance(expected["action"], list) and set(expected["action"]) <= {"ignore", "review"}
+        if expected["action"] == "ignore" or (
+            isinstance(expected["action"], list) and set(expected["action"]) <= {"ignore"}
         ) or spec.get("execution_review"):
             continue
-        if actual.action in {"ignore", "review"}:
+        if actual.action in {"ignore"}:
             continue
         if actual.action == "open":
             symbol = expected["symbol"] + "_USDT"
@@ -180,25 +180,12 @@ def assert_effects(spec, decisions, before, after, aliases, engine, exchange, ev
                 current_orders = exchange.stops if name == "sl" else exchange.orders
                 if source is not None and exit_.get("id"):
                     assert current_orders[exit_["id"]] == source[exit_["id"]]
-        elif actual.action == "close":
+        elif actual.action in {"close", "tp1", "tp2"}:
             assert after[symbol]["size"] == 0 and current["status"] == "closed"
             assert not any(o["status"] == "open" and o["contract"] == symbol
                            for o in exchange.orders.values())
             assert not any(o["status"] == "open" and o["initial"]["contract"] == symbol
                            for o in exchange.stops.values())
-        elif actual.action in {"tp1", "tp2"}:
-            exit_ = original["exits"][actual.action]
-            quantity = 0 if exit_.get("done") else abs(before_orders[exit_["id"]]["left"])
-            sign = 1 if before[symbol]["size"] > 0 else -1
-            assert after[symbol]["size"] == before[symbol]["size"] - sign * quantity
-            pending = [o for o in exchange.orders.values()
-                       if o["contract"] == symbol and o["status"] == "open"]
-            assert sum(o["left"] for o in pending if o["is_reduce_only"]) == abs(after[symbol]["size"])
-            stops = [o for o in exchange.stops.values()
-                     if o["initial"]["contract"] == symbol and o["status"] == "open"]
-            assert bool(stops) == bool(after[symbol]["size"])
-            if not after[symbol]["size"]:
-                assert not pending
         else:
             assert after[symbol]["size"] == before[symbol]["size"]
             levels = expected.get("levels", {}) or {"sl": expected["sl"]}
@@ -237,6 +224,7 @@ def assert_effects(spec, decisions, before, after, aliases, engine, exchange, ev
 
 def assert_initial_plan(trade, planned, exchange):
     """Check native protection against the accepted proposal, not receipt-derived prices."""
+    assert set(trade["exits"]) == {"sl", "tp"}, "Exactly one SL and one full-position TP are required"
     stop = exchange.stops[trade["exits"]["sl"]["id"]]
     assert stop["status"] == "open"
     assert D(stop["trigger"]["price"]) == D(planned["sl"])
@@ -244,16 +232,11 @@ def assert_initial_plan(trade, planned, exchange):
     assert stop["trigger"]["price_type"] == 1
     assert stop["initial"]["contract"] == trade["symbol"]
     assert stop["initial"]["is_close"] and stop["initial"]["is_reduce_only"]
-    first = int(trade["filled"] * D(planned["tp1_fraction"]))
-    for name, size in (("tp1", first), ("tp2", trade["filled"] - first)):
-        if size:
-            order = exchange.orders[trade["exits"][name]["id"]]
-            assert order["status"] == "open"
-            assert order["size"] == size * (-1 if trade["side"] == "long" else 1)
-            assert order["contract"] == trade["symbol"] and order["is_reduce_only"]
-            assert D(order["price"]) == D(planned[name])
-        else:
-            assert name not in trade["exits"], "Zero allocation must not create an exit order"
+    order = exchange.orders[trade["exits"]["tp"]["id"]]
+    assert order["status"] == "open"
+    assert order["size"] == trade["filled"] * (-1 if trade["side"] == "long" else 1)
+    assert order["contract"] == trade["symbol"] and order["is_reduce_only"]
+    assert D(order["price"]) == D(planned["tp"])
 
 
 async def run_case(spec, interpreter, planner, history, image_cache, run_number):

@@ -42,7 +42,8 @@ async def test_full_lifecycle_over_http(tmp_path, monkeypatch, side, limit):
         if path == "/tickers":
             result = await exchange.market(request.query["contract"])
         elif path == "/candlesticks":
-            result = await exchange.candles(request.query["contract"])
+            result = await exchange.candles(request.query["contract"],
+                                            interval=request.query.get("interval", "5m"))
         else:
             result = await exchange.request(
                 request.method, path, json.loads(raw) if raw else None, dict(request.query)
@@ -76,16 +77,16 @@ async def test_full_lifecycle_over_http(tmp_path, monkeypatch, side, limit):
                 await engine.poll()
             assert not exchange.stops  # model-approved entry does not wait for an exit plan
             values = (
-                {"sl": "9", "tp1": "11", "tp2": "12"}
+                {"sl": "9", "tp": "12"}
                 if side == "long"
-                else {"sl": "11", "tp1": "9", "tp2": "8"}
+                else {"sl": "11", "tp": "8"}
             )
             async with TestClient(TestServer(make_app(engine))) as client:
                 job_response = await client.post("/jobs/claim", headers=headers)
                 job = await job_response.json()
                 assert job["filled_contracts"] > 0 and job["candles_5m"]
                 body = {k: job[k] for k in ("trade_id", "version", "lease")}
-                body["plan"] = dict(values, tp1_fraction="0.5", rationale="synthetic test plan")
+                body["plan"] = dict(values, rationale="synthetic test plan")
                 response = await client.post("/plans/proposals", headers=headers, json=body)
                 assert response.status == 200, await response.text()
                 response = await client.post("/plans", headers=headers, json=body)
@@ -102,9 +103,11 @@ async def test_full_lifecycle_over_http(tmp_path, monkeypatch, side, limit):
             assert next(iter(exchange.stops.values()))["trigger"]["price"] == new_sl
             assert exchange.orders["2"]["price"] == new_tp
             await signal(rig, "INJ 当前价格做TP1", message=3)
-            await engine.poll()
+            for _ in range(4):
+                await engine.poll()
             remaining = exchange.position["size"]
-            assert 0 < abs(remaining) < trade["lots"]
+            assert remaining == 0
+            assert store.trade(trade["id"])["status"] == "closed"
             await signal(rig, "INJ 当前价格做TP1", message=4)
             assert exchange.position["size"] == remaining
             before = len(exchange.writes)

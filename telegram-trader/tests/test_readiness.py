@@ -88,7 +88,7 @@ async def test_operator_pause_is_healthy_and_explicit(rig):
     ("scan", "channel_scan_stale"),
     ("reconcile", "reconcile_stale"),
     ("unknown", "exchange_write_unconfirmed"),
-    ("position", "position_requires_review"),
+    ("position", "position_reconciliation_failed"),
 ])
 async def test_business_fault_returns_503_without_changing_controls(rig, monkeypatch, fault, reason):
     store, exchange, engine, credentials = rig

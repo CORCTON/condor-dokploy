@@ -157,7 +157,7 @@ def assert_observation(decision, event_id, messages, row, exchange, store):
     if decision.action == "open":
         assert decision.symbol and decision.side in {"long", "short"}
         assert not decision.target_trade_id
-        assert row["status"] in {"done", "review"}, row
+        assert row["status"] in {"done", "error"}, row
         if row["status"] == "done":
             trades = store.trades()
             assert len(trades) == 1 and trades[0]["symbol"] == decision.symbol + "_USDT"
@@ -168,7 +168,7 @@ def assert_observation(decision, event_id, messages, row, exchange, store):
     else:
         assert not exchange.writes, "Empty-owned management/no-op must never write to exchange"
         assert not store.trades(), "No-op/management invented an owned trade"
-        assert row["status"] in {"ignore", "review"}, row
+        assert row["status"] in {"ignore", "error"}, row
     assert not store.unknowns()
 
 
@@ -269,7 +269,7 @@ def outcome_counts(reports):
         decision["action"] == "open" for decision in report.get("result", {}).get("decisions", []))]
     return {"open_decisions": len(opens),
             "open_executed": sum(row.get("event_result", {}).get("status") == "done" for row in opens),
-            "open_review": sum(row.get("event_result", {}).get("status") == "review" for row in opens),
+            "open_blocked": sum(row.get("event_result", {}).get("status") == "error" for row in opens),
             "open_age_guard_blocked": sum("entry signal older than 60 seconds" in
                                            (row.get("event_result", {}).get("detail") or "") for row in opens),
             "note": "Protocol pass is not execution success or semantic accuracy; the 60-second entry guard remains active"}

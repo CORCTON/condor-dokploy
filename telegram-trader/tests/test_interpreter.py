@@ -425,7 +425,7 @@ async def test_full_batch_retains_unattached_images_and_explicit_followup_levels
     engine.listener_ready = True
     store.set("paused", False)
     inbox = SignalInbox(engine)
-    texts = ["#INJ 当前价格入场空单", "SL 11，TP1 9，TP2 8", "图三", "图四", "图五"]
+    texts = ["#INJ 当前价格入场空单", "SL 11，TP1 8", "图三", "图四", "图五"]
     for number, text in enumerate(texts, 1):
         store.event(1, number, text, 1 if number == 2 else None,
                     time.time(), True, media={"id": str(number)})
@@ -449,7 +449,7 @@ async def test_full_batch_retains_unattached_images_and_explicit_followup_levels
                     "event_id": event["event_id"], "action": "ignore" if index else "open",
                     "symbol": "INJ", "side": "short",
                     "reason": "已将后续止盈止损并入开仓" if index else "明确开空",
-                    "levels": {} if index else {"sl": "11", "tp1": "9", "tp2": "8"},
+                    "levels": {} if index else {"sl": "11", "tp": "8"},
                     "evidence_message_ids": [1, 2] if index == 0 else [event["message_id"]],
                 })
             await inbox.propose(job["lease"], Decisions.model_validate({"decisions": decisions}))
@@ -509,7 +509,7 @@ async def test_full_batch_retains_unattached_images_and_explicit_followup_levels
             assert len(received["events"]) == 5
             await inbox.apply(job["lease"], Decisions.model_validate(result))
         trade = store.trades()[0]
-        assert trade["channel_levels"] == {"sl": "11", "tp1": "9", "tp2": "8"}
+        assert trade["channel_levels"] == {"sl": "11", "tp": "8"}
         assert trade["source_sl"] and len(engine.gate.stops) == 1
     finally:
         store.close()

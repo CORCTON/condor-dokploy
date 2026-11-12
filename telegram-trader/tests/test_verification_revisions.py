@@ -67,5 +67,5 @@ async def test_verification_revision_retains_original_entry_boundary(
             latest = inbox.store.db.execute(
                 "SELECT status FROM events ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
-            assert latest[0] == "review"
+            assert latest[0] == "error"
         assert not inbox.store.unknowns()

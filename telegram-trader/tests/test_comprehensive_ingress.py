@@ -174,7 +174,7 @@ async def test_actual_worker_reanalyzes_authority_failure_without_resetting_sour
     assert len(inbox.engine.gate.orders) == (1 if age_after_failure == 1 else 0)
     if age_after_failure == 61:
         row = inbox.store.db.execute("SELECT status,detail FROM events").fetchone()
-        assert row["status"] == "review" and "60 seconds" in row["detail"]
+        assert row["status"] == "error" and "60 seconds" in row["detail"]
 
 
 async def test_late_failure_for_old_lease_cannot_release_a_newly_claimed_analysis(inbox):
@@ -247,8 +247,8 @@ async def test_pause_or_sixty_seconds_expiry_during_authority_wait_blocks_entry(
             release.set()
         assert (await asyncio.wait_for(task, 2)).status == 200
     row = inbox.store.db.execute("SELECT status,detail FROM events").fetchone()
-    assert row["status"] == "review"
-    assert ("paused" if interruption == "pause" else "60 seconds") in row["detail"]
+    assert row["status"] == "error"
+    assert ("operator requested pause" if interruption == "pause" else "60 seconds") in row["detail"]
     assert not inbox.engine.gate.writes
 
 

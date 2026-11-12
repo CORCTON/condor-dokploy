@@ -140,7 +140,7 @@ async def test_stop_replacement_recovers_confirmed_receipt_after_crash(rig, monk
 async def test_limit_entry_retains_channel_levels_until_actual_fill(rig, combined):
     store, exchange, engine = rig
     trade = await signal(rig, "#INJ 在10限价入场空单")
-    text = "INJ SL: 10.50 TP1: 9.50 TP2: 8.50" if combined else "INJ SL: 10.50"
+    text = "INJ SL: 10.50 TP1: 9.50" if combined else "INJ SL: 10.50"
     await signal(rig, text, message=2)
     pending = store.trade(trade["id"])
     assert pending["channel_levels"]["sl"] == "10.50"
@@ -148,7 +148,7 @@ async def test_limit_entry_retains_channel_levels_until_actual_fill(rig, combine
     assert not exchange.stops
     assert store.db.execute("SELECT status FROM events WHERE message=2").fetchone()[0] == "done"
     if combined:
-        assert pending["channel_levels"]["tp1"] == "9.50"
+        assert pending["channel_levels"]["tp"] == "9.50"
     exchange.orders[trade["entry_id"]].update(left=0, status="finished")
     exchange.position["size"] = -trade["lots"]
     await engine.poll()
@@ -161,7 +161,7 @@ async def test_limit_entry_retains_channel_levels_until_actual_fill(rig, combine
     await engine.apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     if combined:
         assert exchange.orders["2"]["price"] == "9.50"
-        assert exchange.orders["3"]["price"] == "8.50"
+        assert len(exchange.orders) == 2
 
 
 async def test_pending_stop_survives_order_position_visibility_lag(rig):
@@ -187,21 +187,15 @@ async def test_confirmed_channel_profit_stop_does_not_block_first_tp_plan(
     trade = await signal(rig, text)
     exchange.position["mark_price"] = "11.50" if side == "long" else "8.50"
     sl = "10" if at_entry else ("10.50" if side == "long" else "9.50")
-    tp1, tp2 = ("12", "13") if side == "long" else ("8", "7")
-    levels = f"INJ SL: {sl}" + (f" TP1: {tp1} TP2: {tp2}" if combined else "")
+    tp = "13" if side == "long" else "7"
+    levels = f"INJ SL: {sl}" + (f" TP1: {tp}" if combined else "")
     await signal(rig, levels, message=2)
     job = await engine.claim_plan()
-    proposal = Plan(
-        sl="9" if side == "long" else "11",
-        tp1=tp1,
-        tp2=tp2,
-        tp1_fraction="0.5",
-        rationale="isolated simulation",
-    )
+    proposal = Plan(sl="9" if side == "long" else "11", tp=tp, rationale="isolated simulation")
     await engine.propose_plan(job["trade_id"], job["version"], job["lease"], proposal)
     await engine.apply_plan(job["trade_id"], job["version"], job["lease"], proposal)
     current = store.trade(trade["id"])
-    assert set(current["exits"]) == {"sl", "tp1", "tp2"}
+    assert set(current["exits"]) == {"sl", "tp"}
     assert current["exits"]["sl"]["price"] == sl
     assert not current["plan_needed"]
     assert len(exchange.stops) == 1
@@ -249,11 +243,12 @@ async def test_market_tp_cancels_unfilled_entry_and_reconciles_cancel_race(
     for _ in range(2):
         await engine.poll()
     current = store.trade(trade["id"])
-    expected_remaining = 7 if fill_during_cancel else 2
     assert entry["status"] == "finished"
     assert current["entry_terminal"]
-    assert exchange.position["size"] == -expected_remaining
-    assert current["exits"]["tp2"]["size"] == expected_remaining
+    assert exchange.position["size"] == 0
+    assert current["close_requested"]
+    reductions = [o for o in exchange.orders.values() if o["reduce_only"] and o["price"] == "0"]
+    assert sum(abs(o["size"]) - o["left"] for o in reductions) == (14 if fill_during_cancel else 4)
     assert exchange.writes[before][:2] == ("DELETE", f"/orders/{entry['id']}")
     assert not [
         o for o in exchange.orders.values() if not o["reduce_only"] and o["status"] == "open"
@@ -295,7 +290,7 @@ async def test_exit_plan_requires_an_immutable_accepted_proposal(rig):
         await engine.apply_plan(*args, plan())
     await engine.propose_plan(*args, plan())
     await engine.propose_plan(*args, plan())  # identical delivery is idempotent
-    changed = Plan(sl="11", tp1="9.50", tp2="8", tp1_fraction="0.5", rationale="changed")
+    changed = Plan(sl="11", tp="8", rationale="changed")
     with pytest.raises(Review, match="accepted exit plan cannot be changed"):
         await engine.propose_plan(*args, changed)
     with pytest.raises(Review, match="accepted exit-plan proposal"):
@@ -303,7 +298,7 @@ async def test_exit_plan_requires_an_immutable_accepted_proposal(rig):
     assert len(exchange.writes) == before
     await engine.apply_plan(*args, plan())
     assert len(exchange.stops) == 1
-    assert len(exchange.orders) == 3
+    assert len(exchange.orders) == 2
 
 
 @pytest.mark.parametrize("status", ["open", "finished"])
@@ -387,17 +382,3 @@ async def test_stop_receipt_search_does_not_confirm_an_incomplete_page_scan(rig,
     await engine.reconcile_unknowns()
     assert store.operation("unknown-stop")["status"] == "unknown"
     assert engine.paused()
-
-
-async def test_legacy_partial_tp_state_requires_reconciliation_not_guessed_reduction(rig):
-    _store, exchange, engine = rig
-    trade = await planned_trade(rig)
-    item = trade["exits"]["tp1"]
-    item.update(take_attempt=1, take_pending=True)
-    assert "take_filled" not in item
-    before = len(exchange.writes)
-    with pytest.raises(Review, match="legacy TP reduction"):
-        await engine.take_now(trade, "tp1")
-    with pytest.raises(Review, match="legacy TP reduction"):
-        await engine.resize_targets(trade)
-    assert len(exchange.writes) == before

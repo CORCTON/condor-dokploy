@@ -16,7 +16,7 @@ from trader.models import Decision
 
 def test_policy_separates_unsupported_execution_from_retrospective_corrections(interpreter):
     assert "unsupported execution" in interpreter.POLICY
-    assert "do not silently ignore it" in interpreter.POLICY
+    assert "ignore with the unsupported action explained in the reason" in interpreter.POLICY
     assert "management instruction in a different claimed event" in interpreter.POLICY
     assert "retrospective symbol correction without a new execution instruction is ignore" in interpreter.POLICY
     assert "fresh edited first entry still follows the normal entry rules" in interpreter.POLICY
@@ -25,7 +25,8 @@ def test_policy_separates_unsupported_execution_from_retrospective_corrections(i
 def test_primary_recommendation_keeps_explicit_stages_and_conditions(interpreter):
     assert "the operator selects the first" in interpreter.POLICY
     assert "preserving its qualifications" in interpreter.POLICY
-    assert "an explicit TP1/TP2 or quantity takes precedence" in interpreter.POLICY
+    assert "including a named TP1/TP2 instruction" in interpreter.POLICY
+    assert "An explicit partial quantity is unsupported; choose ignore" in interpreter.POLICY
     assert "not required additional actions" in interpreter.POLICY
     assert "does not become unconditional" in interpreter.POLICY
 
@@ -80,7 +81,7 @@ def test_edited_entry_cases_distinguish_first_submission_from_real_duplicate():
     repeated = cases["derived_edited_entry_already_owned"]
     assert repeated["events"][0]["edited"]
     assert repeated["trades"][0]["source"] == 20000  # run_case's first synthetic event ID
-    assert set(repeated["expected"][0]["action"]) <= {"ignore", "review"}
+    assert set(repeated["expected"][0]["action"]) <= {"ignore"}
 
 
 @pytest.mark.parametrize("name,action", [

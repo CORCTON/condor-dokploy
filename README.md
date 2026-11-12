@@ -112,16 +112,34 @@ write exists. Original model deadlines and entry-age checks remain unchanged.
   using the returned position's `pos_margin_mode`, `mode`, and `lever` fields.
 - No initial stop is invented. No timed position close. AI plans are schema-,
   version-, direction- and tick-checked. Channel numeric levels take precedence.
-- Native reduce-only TP limits and full-position mark-price SL triggers.
+- The `single_tp_4h_v1` policy has one full-position TP. The typed plan contains
+  `sl`, `tp` and `rationale`, with no staged allocation. The AI uses 4-hour
+  resistance for a long or support for a short as the fallback TP, while the
+  existing 5-minute SL invalidation method is unchanged. Missing 4-hour evidence
+  must not produce an invented target. Explicit valid channel prices take precedence.
+  An immediate TP, TP1, TP2 or SL-exit instruction means market full close, even
+  before an AI plan exists. A numeric TP1/TP2 target amends the unique TP instead;
+  conflicting simultaneous target prices are ignored with a reason. Cost-SL means our actual
+  entry price, not the author's entry or a fee-adjusted breakeven guarantee.
+  Retrospective reports do not authorize orders. Add-ons remain disabled.
+- One native reduce-only TP limit and a full-position mark-price SL trigger.
+  If the native TP fills (even partially), reconciliation persists
+  full-close intent, cancels unfilled entry quantity and clears the remaining
+  position at market. That exceptional path depends on service reconciliation;
+  it is not an atomic exchange-side full close at the TP limit price.
   Trigger expiry is renewed before expiry; it is **not** a position timeout.
   Renewal preserves the previous stop reference until its replacement is confirmed.
   Uncertain stop writes require exact receipt reconciliation, never blind retries.
+- There is no legacy staged-TP compatibility path. Do not start this version over
+  active old-policy records or TP1/TP2 orders. Existing live trades require a
+  separately reviewed migration; merely replacing the image is not sufficient.
 - Acknowledgement is not a fill. Partial fills/reductions are reconciled.
   Remaining entry orders are cancelled when exits start. Every exchange write
   has a durable intent; ambiguous timeouts pause new entries and are never
   blindly resent, even when a text-ID lookup returns 404.
-- Gemini classifies non-actionable reports/analysis as `ignore`. Ambiguous
-  instructions become `review` and notify the admin. Contextual phrases such as
+- Gemini classifies non-actionable reports/analysis, ambiguous instructions and
+  unsupported actions as `ignore`, with reasons recorded. There is no approval queue;
+  ignoring one signal does not pause other trading. Contextual phrases such as
   平掉/离场/撤掉 are interpreted with history and actual owned-trade state, not a
   dictionary. `cancel` cancels only unfilled entry quantity; it does not remove
   protective orders or flatten filled positions. `close` cancels the remaining
@@ -131,7 +149,7 @@ write exists. Original model deadlines and entry-age checks remain unchanged.
   restart are still interpreted but are not auto-opened. This freshness guard is separate from position
   holding time. Recovered management instructions are reinterpreted against current
   channel context and owned state; historical entries never open. Previously completed
-  or reviewed events are not automatically replayed. The dedicated account must not
+  or ignored/failed events are not automatically replayed. The dedicated account must not
   be concurrently traded by other bots.
 - Private API port is internal only and token-authenticated. There is no free-form
   order endpoint. A decision submission requires a current durable analysis
@@ -148,6 +166,12 @@ operator deployment is provisioned with the intended environment/credentials and
 `telegram_agent/trader_status` Routine. Deployment readiness is not activation:
 the initial persisted pause remains set until an explicit operator start.
 Restart preserves operator pause state.
+Transient exchange reads or listener disconnects block new entries only until
+successful reconciliation/reconnection; they do not latch the operator pause.
+Unknown write outcomes, ownership inconsistencies and protection faults retain
+their safety block. Recovery never replays skipped entry signals or clears an
+operator pause. Status separates `last_ignored`, `last_issue`, `pause_latched`
+and `temporary_entry_blocks`; there is no manual approval queue.
 Telegram collection and interpretation can run with exchange execution disabled;
 they do not require exchange keys. New decisions remain non-executable while disabled.
 

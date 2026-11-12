@@ -192,7 +192,7 @@ async def test_worker_applies_accepted_proposal_once_then_exits_before_claiming_
             assert trade["filled"] == 14 and trade["status"] == "working"
             if kind == "exit_planner":
                 assert not trade["plan_needed"]
-                assert set(trade["exits"]) == {"sl", "tp1", "tp2"}
+                assert set(trade["exits"]) == {"sl", "tp"}
             writes = list(exchange.writes)
             # The real process exit ends this task. Release the local fake only
             # after proving no second job ran, then emulate a fresh worker.

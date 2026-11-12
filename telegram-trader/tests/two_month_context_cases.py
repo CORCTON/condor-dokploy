@@ -14,10 +14,10 @@ CASES = [
     case(
         "real_context_advertised_ETH_entry_exit_preserves_owned_short",
         [14996],
-        [decision(["ignore", "review"])],
+        [decision(["ignore"])],
         [trade("ETH", "short", 9_000_001)],
         fixture_note=(
-            "An existing ETH short has native SL/TP1/TP2. Source9000001 is only a synthetic "
+            "An existing ETH short has native SL and a full-position TP. Source9000001 is only a synthetic "
             "owned-entry identity, absent from real channel history; no real source is relabelled. "
             "Its price10 is synthetic. 14996 replies to VIP promotion14979 and contains an old "
             "ETH2423 short/add-on/targets plan beside its profit screenshot and optional exit. "
@@ -28,10 +28,10 @@ CASES = [
     case(
         "real_context_ZETA_cancel_absent_addon_preserves_original",
         [15184],
-        [decision(["ignore", "review"])],
+        [decision(["ignore"])],
         [dict(trade("ZETA", "long", 15179), entry="0.06378", tick="0.00001")],
         fixture_note=(
-            "The original ZETA long is filled with native SL/TP1/TP2. No add-on was ever "
+            "The original ZETA long is filled with native SL and a full-position TP. No add-on was ever "
             "created from 15181. Its reply 15184 cancels that absent add-on and reports "
             "TP1 already reached; it does not cancel the original or command a new TP1 sale."
         ),
@@ -39,10 +39,10 @@ CASES = [
     case(
         "real_context_BR_exit_unowned_short_preserves_old_long",
         [15196],
-        [decision(["ignore", "review"])],
+        [decision(["ignore"])],
         [dict(trade("BR", "long", 15163), entry="1.10", tick="0.0001")],
         fixture_note=(
-            "Only the older BR long from 15163 exists, with native SL/TP1/TP2. "
+            "Only the older BR long from 15163 exists, with native SL and a full-position TP. "
             "15196 replies to the distinct bearish idea 15194, which never opened "
             "an owned short. Matching BR alone must not close the old long."
         ),
@@ -50,11 +50,11 @@ CASES = [
     case(
         "real_context_advertised_BTC_cancel_preserves_pending_order",
         [15355],
-        [decision(["ignore", "review"])],
+        [decision(["ignore"])],
         [trade("BTC", "long", 15161, limit="10", market="11", fill=4)],
         fixture_note=(
             "A synthetic BTC limit entry has four filled contracts, an unfilled remainder, "
-            "and native SL/TP1/TP2. Source 15161 identifies it, but this seed does not claim "
+            "and native SL and a full-position TP. Source 15161 identifies it, but this seed does not claim "
             "that its three-target instruction was supported or historically executed. "
             "15355 is a VIP-advertising album screenshot containing an old BTC cancel quote "
             "and AVA profit card, not a current instruction to cancel this account's BTC order. "
@@ -98,14 +98,14 @@ CASES = [
         ),
     ),
     case(
-        "real_context_INJ_explicit_TP1_uses_owned_allocation",
+        "real_context_INJ_explicit_TP1_closes_owned_position",
         [15319],
-        [decision("tp1", target="A")],
+        [decision("close", target="A")],
         [trade("INJ", "short", 15317)],
         fixture_note=(
-            "Operator confirmed on 2026-10-25: an explicit TP1 uses the existing owned TP1 "
-            "allocation, not a full close or an invented reduction. The remaining synthetic "
-            "INJ short must retain its SL and TP2 protection."
+            "Operator confirmed on 2026-10-27: an explicit immediate TP1 means full close. "
+            "Close the associated synthetic INJ short and cancel its native SL and TP. "
+            "The original channel message remains unchanged."
         ),
     ),
 ]
@@ -127,7 +127,7 @@ def assert_context_report(spec, report):
     """Additional acceptance checks beyond run_case's exact order/stop equality."""
     assert report["semantic_passed"] and report["execution_passed"], report
     actions = spec["expected"][0]["action"]
-    if set(actions if isinstance(actions, list) else [actions]) <= {"ignore", "review"}:
+    if set(actions if isinstance(actions, list) else [actions]) <= {"ignore"}:
         assert report["exchange_writes"] == [], "Context-only message mutated exchange state"
         before = {trade["id"]: trade for trade in report["owned_before"].values()}
         after = {trade["id"]: trade for trade in report["owned_after"]}

@@ -136,7 +136,7 @@ async def list_tools():
         return [
             types.Tool(
                 name="submit_exit_plan",
-                description="Submit SL, TP1, TP2 and the TP1 fraction for the assigned filled trade only. This stages a validated proposal, never sends an exchange order. Correct tool-validation errors and resubmit, then finish. Do not claim orders exist.",
+                description="Submit SL, the single full-position TP and rationale using exactly the supplied schema for the assigned filled trade only. This stages a validated proposal, never sends an exchange order. Correct tool-validation errors and resubmit, then finish. Do not claim orders exist.",
                 inputSchema=json.loads(os.environ["EXIT_PLAN_SCHEMA"]),
             )
         ]

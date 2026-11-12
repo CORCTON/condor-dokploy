@@ -5,11 +5,14 @@ import time
 import uuid
 from decimal import ROUND_DOWN, Decimal
 
-from .gate import GateError
+from aiohttp import ClientError
+
+from .gate import GateError, order_matches_intent
 from .models import Plan
 from .models import decimal as D
 
 LEVERAGE = 10
+EXIT_POLICY = "single_tp_4h_v1"
 
 
 class Review(Exception):
@@ -20,8 +23,28 @@ class Reanalyze(Review):
     """Context changed before an order write; obtain a new model decision."""
 
 
+def transient_exchange_error(exc):
+    """Unavailable reads can recover; uncertain writes still latch their own pause."""
+    return isinstance(exc, (ClientError, OSError, TimeoutError)) or (
+        isinstance(exc, GateError)
+        and (exc.status >= 500 or exc.status in {408, 429}
+             or exc.label in {"INVALID_JSON_RESPONSE", "INVALID_RESPONSE_SCHEMA"})
+    )
+
+
 def tag(key):
     return "t-cdt-" + hashlib.sha256(key.encode()).hexdigest()[:22]
+
+
+def target_levels(levels):
+    """Channel stage names are aliases for one exit, not separate allocations."""
+    targets = {D(price) for name, price in levels.items() if name != "sl"}
+    if len(targets) > 1:
+        raise Review("multiple distinct TP prices require clarification for the single exit")
+    result = {"sl": levels["sl"]} if "sl" in levels else {}
+    if targets:
+        result["tp"] = str(next(iter(targets)))
+    return result
 
 
 def isolated_position(position):
@@ -72,6 +95,7 @@ class Engine:
         self.last_channel_scan = None
         self.last_reconcile = None
         self._worker_heartbeats = {}
+        self._entry_blockers = {}
 
     def record_heartbeat(self, name):
         if name not in {"interpreter", "planner"}:
@@ -87,10 +111,29 @@ class Engine:
         return time.monotonic() - heartbeat[1] if heartbeat else None
 
     def paused(self):
-        return self.store.get("paused", True) or bool(self.store.unknowns())
+        return (self.store.get("paused", True) or bool(self.store.unknowns())
+                or bool(self.entry_blockers()))
+
+    def entry_blockers(self):
+        return {
+            **self._entry_blockers,
+            **{t["id"]: t["last_error"] for t in self.active() if t.get("last_error")},
+        }
+
+    def pause_reason(self):
+        if self.store.get("paused", True):
+            return self.store.get("pause_reason", "activation required")
+        if self.store.unknowns():
+            return "exchange write outcome unknown"
+        return "; ".join(self.entry_blockers().values())
 
     def pause(self, reason):
         self.pause_revision += 1
+        previous = self.store.get("pause_reason")
+        if self.store.get("paused", True) and previous and reason != "operator requested pause":
+            # Keep the initiating cause, especially an operator pause or an
+            # uncertain write, instead of overwriting it in a later catch block.
+            return
         self.store.set("paused", True)
         self.store.set("pause_reason", reason)
 
@@ -106,7 +149,9 @@ class Engine:
                 if self.store.unknowns():
                     raise Review("存在结果未确认的订单，未开启跟单；请先核对订单结果。")
                 if any(t.get("last_error") for t in self.active()):
-                    raise Review("已有仓位需要人工核查，未开启跟单；请先查看执行状态。")
+                    raise Review("已有仓位对账尚未恢复，未开启跟单；请先查看执行状态。")
+                if self._entry_blockers:
+                    raise Review("依赖服务尚未恢复，未开启跟单；请等待状态恢复。")
                 if any(age is None or age > 180 for age in (
                     self.worker_age("interpreter"), self.worker_age("planner")
                 )):
@@ -148,6 +193,16 @@ class Engine:
             if previous["status"] == "confirmed":
                 return json.loads(previous["result"])
             raise Review("previous operation is unconfirmed/rejected; no blind retry")
+        if method == "PUT" and path.startswith("/orders/") and any(
+            operation["trade_id"] == trade["id"]
+            and operation["path"] == path
+            and operation["method"] in {"PUT", "DELETE"}
+            for operation in self.store.unknowns()
+        ):
+            # A timed-out amendment can still arrive after a newer operation key
+            # and overwrite it. Reading the target cannot settle a pending write.
+            # Keep this scoped to that target; SL maintenance and full close remain available.
+            raise Review("target order has an unconfirmed write; reconcile before another amendment")
         self.store.intent(key, trade["id"], method, path, {"body": body, "params": params})
         try:
             result = await self.gate.request(method, path, body=body, params=params)
@@ -178,10 +233,8 @@ class Engine:
         payload = json.loads(event["payload"])
         self.store.finish(event["id"], "processing")
         try:
-            if signal.action in {"ignore", "review"}:
-                if signal.action == "review":
-                    self.store.notice(f"Signal needs review: {event['message']} / {signal.reason}")
-                self.store.finish(event["id"], signal.action, signal.reason)
+            if signal.action == "ignore":
+                self.store.finish(event["id"], "ignore", signal.reason)
                 return
             if not self.enabled:
                 raise Review("deployment disabled")
@@ -199,8 +252,10 @@ class Engine:
                     raise Reanalyze("unread channel backlog; reanalyze before entry")
                 if time.time() - payload["source_time"] > 60:
                     raise Review("entry signal older than 60 seconds; no new entry")
-                if self.paused() or not self.listener_ready:
-                    raise Review("new entries paused or listener not ready")
+                if not self.listener_ready:
+                    raise Review("channel listener not ready; entry not submitted")
+                if self.paused():
+                    raise Review("new entry blocked: " + self.pause_reason())
                 await self.open(event, signal, watermark)
             else:
                 trade = self.store.trade(signal.target_trade_id)
@@ -222,7 +277,7 @@ class Engine:
                 elif signal.action == "cancel":
                     await self.cancel_entry(trade)
                 else:
-                    await self.take_now(trade, signal.action)
+                    await self.close_trade(trade)
             self.store.finish(event["id"], "done")
             if signal.reason:
                 self.store.notice(f"Signal {event['message']}: {signal.reason}")
@@ -235,12 +290,21 @@ class Engine:
                     (event["id"],),
                 )
             raise
-        except (Review, GateError, OSError, TimeoutError, ValueError, KeyError) as exc:
+        except (Review, GateError, ClientError, OSError, TimeoutError, ValueError, KeyError) as exc:
             detail = (
                 str(exc) if isinstance(exc, (Review, GateError, ValueError)) else type(exc).__name__
             )
-            self.store.finish(event["id"], "review", detail)
-            self.store.notice(f"Signal {event['message']} requires review: {detail}")
+            self.store.finish(event["id"], "error", detail)
+            self.store.notice(f"Signal {event['message']} execution stopped: {detail}")
+
+    async def entry_position(self, symbol):
+        """A missing record is valid only before entry, never proof of margin mode."""
+        try:
+            return await self.gate.get(f"/positions/{symbol}")
+        except GateError as exc:
+            if exc.status == 400 and exc.label == "POSITION_NOT_FOUND":
+                return None
+            raise
 
     async def open(self, event, signal, watermark):
         trade_id = hashlib.sha256(f"{event['channel']}:{event['message']}".encode()).hexdigest()[
@@ -258,14 +322,14 @@ class Engine:
             raise Review("same-symbol trade already active; add-ons disabled")
         account, position, orders, triggers, contract, tickers = await asyncio.gather(
             self.gate.get("/accounts"),
-            self.gate.get(f"/positions/{symbol}"),
+            self.entry_position(symbol),
             self.gate.get("/orders", contract=symbol, status="open"),
             self.gate.get("/price_orders", contract=symbol, status="open"),
             self.gate.get(f"/contracts/{symbol}"),
             self.gate.market(symbol),
         )
         validate_account(account)
-        if D(position["size"]) != 0:
+        if position is not None and D(position["size"]) != 0:
             raise Review("unmanaged position exists")
         if orders:
             raise Review("unmanaged open orders exist")
@@ -301,8 +365,9 @@ class Engine:
             "multiplier": contract["quanto_multiplier"],
             "exits": {},
             "plan": None,
+            "exit_policy": EXIT_POLICY,
             "retired_stops": [],
-            "channel_levels": signal.levels,
+            "channel_levels": target_levels(signal.levels),
             "plan_needed": False,
             "plan_lease": 0,
             "source_sl": False,
@@ -364,14 +429,15 @@ class Engine:
         except GateError as exc:
             if exc.status != 404:
                 raise
-            # Gate can temporarily hide cancelled zero-fill orders. Only a
-            # durable, confirmed terminal receipt is proof; 404 alone is not.
-            row = self.store.db.execute(
-                "SELECT result FROM operations WHERE method='DELETE' AND path=? "
-                "AND status='confirmed' ORDER BY created DESC LIMIT 1",
+            # Gate can hide terminal zero-fill orders. Only our durable,
+            # confirmed receipt for this ID is proof; 404 alone is not.
+            rows = self.store.db.execute(
+                "SELECT result FROM operations WHERE status='confirmed' AND "
+                "((method IN ('DELETE','PUT') AND path=?) OR "
+                "(method='POST' AND path='/orders')) ORDER BY created DESC",
                 (f"/orders/{order_id}",),
-            ).fetchone()
-            if row:
+            )
+            for row in rows:
                 result = json.loads(row[0])
                 if str(result.get("id")) == str(order_id) and result.get("status") == "finished":
                     return result
@@ -420,7 +486,14 @@ class Engine:
             trade["filled"] = filled
             trade["entry_price"] = str(D(order["fill_price"]))
             trade["version"] += 1
-            trade["plan_needed"] = trade["plan"] is None
+            trade["plan_needed"] = trade["plan"] is None or trade["plan_needed"]
+            if trade["plan"] is None:
+                # An unstarted proposal used the previous fill basis. A newly
+                # confirmed fill needs a fresh lease/plan; started plans instead
+                # retain their durable intents and resize through reconciliation.
+                # Keep the expired token so a lost-response retry cannot reuse
+                # its nonce to claim this newer fill version.
+                trade.update(plan_proposal=None, plan_lease=0)
             self.store.save_trade(trade)
             self.store.notice(
                 f"Fill confirmed: {trade['symbol']} {filled} contracts @ {trade['entry_price']}. "
@@ -431,16 +504,6 @@ class Engine:
         trade["position_size"] = quantity
         if quantity and trade["filled"] == 0:
             raise Review("position exists before owned fill is confirmed")
-        channel_sl = trade.get("channel_levels", {}).get("sl")
-        current_sl = trade["exits"].get("sl")
-        if (
-            quantity
-            and channel_sl
-            and (
-                not trade["source_sl"] or not current_sl or D(current_sl["price"]) != D(channel_sl)
-            )
-        ):
-            await self.stop(trade, D(channel_sl), "channel")
         # A fill may become visible in orders before positions. Do not declare it
         # closed in the same poll; require two independent zero observations.
         if quantity == 0 and (trade["filled"] > 0 or trade["entry_terminal"]):
@@ -451,96 +514,95 @@ class Engine:
             trade["zero_reads"] = 0
         if trade.get("close_requested") and quantity:
             await self.close_trade(trade)
-        for name, exit_order in list(trade["exits"].items()):
-            if name != "sl" and not exit_order.get("done"):
-                result = await self.order(exit_order["id"])
-                exit_order["filled"] = int(abs(D(result["size"])) - abs(D(result["left"])))
-                if exit_order["filled"] and not trade["entry_terminal"]:
-                    await self.cancel_regular(trade, trade["entry_id"], "exit-started")
-                    trade["entry_terminal"] = True
-                    self.store.save_trade(trade)
-                    # The entry may fill again while its cancellation is in
-                    # flight. Refresh the terminal receipt before reallocating.
-                    await self.refresh(trade)
-                    return
-                if result["status"] != "open":
-                    exit_order["done"] = True
-            if name != "sl" and exit_order.get("take_pending"):
-                await self.take_now(trade, name)
+        if trade.get("close_requested"):
+            await self.maintain_stop(trade)
+            self.store.save_trade(trade)
+            return
+        target = trade["exits"].get("tp")
+        if target and not target.get("done"):
+            receipt = await self.order(target["id"])
+            target["filled"] = int(abs(D(receipt["size"])) - abs(D(receipt["left"])))
+            if target["filled"]:
+                # Any confirmed target fill starts final exit. Persist that intent
+                # and cancel an entry that could otherwise continue filling.
+                await self.close_trade(trade)
+                return
+            if receipt["status"] != "open":
+                target["done"] = True
+        if await self.maintain_stop(trade):
+            return
+        channel_sl = trade.get("channel_levels", {}).get("sl")
+        current_sl = trade["exits"].get("sl")
+        if (
+            quantity
+            and channel_sl
+            and (
+                not trade["source_sl"] or not current_sl or D(current_sl["price"]) != D(channel_sl)
+            )
+        ):
+            await self.stop(trade, D(channel_sl), "channel")
+        if quantity and trade["plan"] and trade["plan_needed"]:
+            await self.install_plan(trade)
         self.store.save_trade(trade)
         if trade["plan"] and trade["status"] == "working" and quantity:
             await self.resize_targets(trade)
 
+    async def maintain_stop(self, trade, *, verify_position=False):
+        """Reconcile native protection before fallible discretionary management."""
+        sl = trade["exits"].get("sl")
+        if not sl or trade["status"] != "working":
+            return False
+        if verify_position:
+            position = await self.owned_position(trade)
+            trade["position_size"] = int(abs(D(position["size"])))
+        if not trade.get("position_size"):
+            return False
+        result = await self.gate.get(f"/price_orders/{sl['id']}")
+        if result["status"] != "open":
+            if result.get("finish_as") == "succeeded":
+                if not trade.get("close_requested"):
+                    await self.close_trade(trade)
+                return True
+            if result.get("finish_as") != "expired":
+                raise Review("native stop no longer active; protection unavailable")
+            await self.renew_stop(trade)
+        elif time.time() - sl["created"] > 82800:
+            await self.renew_stop(trade)
+        return False
+
     async def resize_targets(self, trade):
-        """Allocate later limit fills without leaving the additional fill orphaned."""
+        """Cover additional entry fills with the same full-position target."""
         if trade.get("close_requested"):
             return
-        allocations = [trade["exits"][name] for name in ("tp1", "tp2") if name in trade["exits"]]
-        if any(item.get("take_attempt", 0) > 0 and "take_filled" not in item for item in allocations):
-            raise Review("legacy TP reduction needs fill reconciliation before reallocating")
-        if any(
-            item.get("done")
-            and not item.get("take_pending")
-            and item.get("filled", 0) + item.get("take_filled", 0) < item["size"]
-            for item in allocations
-        ):
-            sl = trade["exits"].get("sl")
-            if sl:
-                result = await self.gate.get(f"/price_orders/{sl['id']}")
-                if result["status"] != "open" and result.get("finish_as") == "succeeded":
-                    await self.close_trade(trade)
-                    return
-                if (
-                    result["status"] == "open" and time.time() - sl["created"] > 82800
-                ) or (result["status"] != "open" and result.get("finish_as") == "expired"):
-                    await self.renew_stop(trade)
-            raise Review("TP closed before its allocation completed; manual review required")
-        if (
-            not trade["plan_needed"]
-            and allocations
-            and all(
-                item.get("done")
-                and not item.get("take_pending")
-                and item.get("filled", 0) + item.get("take_filled", 0) >= item["size"]
-                for item in allocations
-            )
-        ):
-            # All allocated exits filled, but the entry cancellation raced a
-            # further fill. Complete the existing full-exit intent, reduce-only.
+        item = trade["exits"].get("tp")
+        if item and item.get("filled", 0):
             await self.close_trade(trade)
             return
-        first = int(
-            (D(trade["filled"]) * D(trade["plan"]["tp1_fraction"])).to_integral_value(
-                rounding=ROUND_DOWN
-            )
+        if item and item.get("done"):
+            raise Review("TP closed before its allocation completed; target unavailable")
+        target = trade["filled"]
+        if not item:
+            price = trade.get("channel_levels", {}).get("tp", trade["plan"]["tp"])
+            await self.place_target(trade, "tp", target, price)
+            return
+        if target <= item["size"]:
+            return
+        result = await self.order(item["id"])
+        if abs(D(result["size"])) != abs(D(result["left"])):
+            await self.close_trade(trade)
+            return
+        if result["status"] != "open":
+            raise Review("TP closed before its allocation completed; target unavailable")
+        signed = -target if trade["side"] == "long" else target
+        await self.write(
+            trade,
+            f"{trade['id']}:tp:size:{target}",
+            "PUT",
+            f"/orders/{item['id']}",
+            {"size": signed},
         )
-        tp1 = trade["exits"].get("tp1")
-        tp2 = trade["exits"].get("tp2")
-        if tp1 and tp1.get("done") and not tp1.get("take_pending"):
-            first = tp1.get("filled", 0) + tp1.get("take_filled", 0)
-        elif tp2 and tp2.get("done") and not tp2.get("take_pending"):
-            first = trade["filled"] - tp2.get("filled", 0) - tp2.get("take_filled", 0)
-        for name, target in (("tp1", first), ("tp2", trade["filled"] - first)):
-            item = trade["exits"].get(name)
-            if not item:
-                if target:
-                    await self.place_target(trade, name, target, trade["plan"][name])
-                continue
-            if item.get("done") or item.get("take_pending") or target <= item["size"]:
-                continue
-            result = await self.order(item["id"])
-            if result["status"] != "open":
-                continue
-            signed = -target if trade["side"] == "long" else target
-            await self.write(
-                trade,
-                f"{trade['id']}:{name}:size:{target}",
-                "PUT",
-                f"/orders/{item['id']}",
-                {"size": signed},
-            )
-            item["size"] = target
-            self.store.save_trade(trade)
+        item["size"] = target
+        self.store.save_trade(trade)
 
     async def place_target(self, trade, name, size, price):
         key = f"{trade['id']}:{name}:initial"
@@ -580,7 +642,7 @@ class Engine:
                         "DELETE",
                         f"/price_orders/{item['id']}",
                     )
-            else:
+            elif item.get("id"):
                 await self.cancel_regular(trade, item["id"], "cleanup")
         await self.cancel_retired_stops(trade)
         # Re-read after cancellation in case the entry filled during the race.
@@ -614,6 +676,13 @@ class Engine:
         ):
             raise Review("SL already crossed; will not silently reinterpret as market close")
         existing = trade["exits"].get("sl")
+        if not existing and any(
+            op["trade_id"] == trade["id"] and op["path"] == "/price_orders"
+            and op["method"] == "POST" for op in self.store.unknowns()
+        ):
+            # Version changes must not turn an unknown initial stop into a new
+            # POST intent. Reconciliation must recover its exact receipt first.
+            raise Review("initial SL outcome unknown; no blind retry")
         if existing and D(existing["price"]) == price and not replace:
             current = await self.gate.get(f"/price_orders/{existing['id']}")
             if current["status"] != "open":
@@ -694,6 +763,9 @@ class Engine:
         self.store.notice(f"Exchange SL accepted: {trade['symbol']} @ {price} ({source}).")
 
     async def targets(self, trade, levels):
+        if trade.get("close_requested"):
+            raise Review("trade is closing; target changes are no longer accepted")
+        levels = target_levels(levels)
         for name, price in levels.items():
             if D(price) <= 0 or D(price) % D(trade["tick"]) != 0:
                 raise Review("channel target not on exchange tick")
@@ -720,8 +792,7 @@ class Engine:
                     f"/orders/{item['id']}",
                     {"price": price},
                 )
-        # Before a plan exists, record TP prices but leave reduction fractions to
-        # the planner; never invent a fraction just to satisfy an incomplete signal.
+        # Prices may arrive before a plan; the sole target always exits the full position.
 
     def plan_trade(self, trade_id, version, lease):
         trade = self.store.trade(trade_id)
@@ -745,7 +816,7 @@ class Engine:
         existing = trade["exits"].get("sl")
         protected_stop = trade["source_sl"] and existing and D(existing["price"]) == plan.sl
         plan.validate_side(trade["side"], D(trade["entry_price"]), validate_stop=not protected_stop)
-        for price in (plan.sl, plan.tp1, plan.tp2):
+        for price in (plan.sl, plan.tp):
             if price % D(trade["tick"]) != 0:
                 raise Review("AI price not on exchange tick")
         return plan
@@ -787,6 +858,8 @@ class Engine:
             trade = self.plan_trade(trade_id, version, lease)
             plan = self.validate_plan(trade, plan)
             proposal = json.loads(plan.model_dump_json())
+            if trade.get("plan") is not None and trade["plan"] != proposal:
+                raise Review("started exit plan cannot be changed")
             if trade.get("plan_proposal") is not None and trade["plan_proposal"] != proposal:
                 raise Review("accepted exit plan cannot be changed")
             trade["plan_proposal"] = proposal
@@ -798,9 +871,16 @@ class Engine:
     async def apply_plan(self, trade_id, version, lease, plan):
         async with self.lock:
             trade = self.plan_trade(trade_id, version, lease)
+            # The accepted model proposal is immutable; newer explicit channel
+            # levels are authoritative overrides, not a new model proposal.
             plan = self.validate_plan(trade, plan)
-            if trade.get("plan_proposal") != json.loads(plan.model_dump_json()):
+            proposal = trade.get("plan_proposal")
+            accepted = (self.validate_plan(trade, Plan.model_validate(proposal))
+                        if proposal is not None else None)
+            if accepted != plan:
                 raise Review("execution requires the accepted exit-plan proposal")
+            if trade.get("plan") is not None and trade["plan"] != json.loads(plan.model_dump_json()):
+                raise Review("started exit plan cannot be changed")
             position = await self.owned_position(trade)
             quantity = int(abs(D(position["size"])))
             if quantity <= 0:
@@ -814,73 +894,30 @@ class Engine:
                     raise Review("channel SL is no longer active at the planned price")
             trade["plan"] = json.loads(plan.model_dump_json())
             self.store.save_trade(trade)
-            if not trade["source_sl"]:
-                await self.stop(trade, plan.sl, "ai")
-            # Native reduce-only limits; no polling/LLM in the exchange execution path.
-            first = int((D(quantity) * plan.tp1_fraction).to_integral_value(rounding=ROUND_DOWN))
-            sizes = {"tp1": first, "tp2": quantity - first}
-            for name, price in (("tp1", plan.tp1), ("tp2", plan.tp2)):
-                if not sizes[name] or name in trade["exits"]:
-                    continue
-                await self.place_target(trade, name, sizes[name], price)
-            trade["plan_needed"] = False
-            self.store.save_trade(trade)
+            await self.install_plan(trade)
 
-    async def take_now(self, trade, name):
-        item = trade["exits"].get(name)
-        if not item:
-            raise Review("TP allocation not established yet; no guessed reduction fraction")
-        if item.get("taken_now"):
+    async def install_plan(self, trade):
+        """Resume the persisted plan through the same durable exchange intents."""
+        if trade.get("close_requested"):
             return
-        if item.get("take_attempt", 0) > 0 and "take_filled" not in item:
-            raise Review("legacy TP reduction needs fill reconciliation before retrying")
-        if not trade["entry_terminal"]:
-            await self.cancel_regular(trade, trade["entry_id"], "take-now")
-            trade["entry_terminal"] = True
-            self.store.save_trade(trade)
-            # Account for fills racing the cancellation before sizing the TP.
-            await self.refresh(trade)
-            item = trade["exits"][name]
-        result = await self.cancel_regular(trade, item["id"], "take-now")
-        remaining = max(0, int(abs(D(result["left"]))) - item.get("take_filled", 0))
-        attempt = item.get("take_attempt", 0)
-        key = f"{trade['id']}:{name}:take-now:{attempt}"
-        previous = self.store.operation(key)
-        if previous:
-            if previous["status"] != "confirmed":
-                raise Review("TP reduction outcome unknown")
-            reduced = await self.order(str(json.loads(previous["result"])["id"]))
-            if reduced["status"] == "open":
-                return
-            remaining = int(abs(D(reduced["left"])))
-            item["take_filled"] = (
-                item.get("take_filled", 0) + int(abs(D(reduced["size"]))) - remaining
-            )
-            attempt += 1
-            item["take_attempt"] = attempt
         position = await self.owned_position(trade)
-        remaining = min(remaining, int(abs(D(position["size"]))))
-        if remaining:
-            key = f"{trade['id']}:{name}:take-now:{attempt}"
-            item["take_pending"] = True
-            self.store.save_trade(trade)
-            await self.write(
-                trade,
-                key,
-                "POST",
-                "/orders",
-                {
-                    "contract": trade["symbol"],
-                    "size": -remaining if trade["side"] == "long" else remaining,
-                    "price": "0",
-                    "tif": "ioc",
-                    "reduce_only": True,
-                    "text": tag(key),
-                },
-            )
+        quantity = int(abs(D(position["size"])))
+        if not quantity:
+            raise Review("position is no longer open")
+        plan = Plan.model_validate(trade["plan"])
+        levels = trade.get("channel_levels", {})
+        existing = trade["exits"].get("sl")
+        if not existing:
+            await self.stop(trade, D(levels.get("sl", plan.sl)), "channel" if "sl" in levels else "ai")
         else:
-            item["taken_now"] = True
-            item["take_pending"] = False
+            current = await self.gate.get(f"/price_orders/{existing['id']}")
+            if current["status"] != "open":
+                raise Review("native stop is not active; reconcile before installing targets")
+        # Keep channel levels and already accepted targets. The model never
+        # replans a partially installed position after a lease expires.
+        if "tp" not in trade["exits"]:
+            await self.place_target(trade, "tp", trade["filled"], levels.get("tp", plan.tp))
+        trade["plan_needed"] = False
         self.store.save_trade(trade)
 
     async def cancel_retired_stops(self, trade):
@@ -958,23 +995,26 @@ class Engine:
                 body = json.loads(op["body"])["body"]
                 try:
                     result = await self.order(body["text"])
-                except GateError:
+                except (GateError, OSError, TimeoutError, ClientError):
+                    continue
+                if not order_matches_intent(result, body):
                     continue
                 self.store.result(op["id"], result)
                 self.store.notice(
-                    "Previously uncertain order found. New entries remain paused pending review."
+                    "Previously uncertain order found. The safety pause remains; "
+                    "check status before explicitly starting again."
                 )
             elif op["method"] == "POST" and op["path"] == "/price_orders":
                 body = json.loads(op["body"])["body"]
                 try:
                     result = await self.find_stop_receipt(body)
-                except (GateError, OSError, TimeoutError):
+                except (GateError, OSError, TimeoutError, ClientError):
                     continue
                 if result is not None:
                     self.store.result(op["id"], result)
                     self.store.notice(
                         "Previously uncertain stop found by exact intent. "
-                        "New entries remain paused pending review."
+                        "The safety pause remains; check status before explicitly starting again."
                     )
 
     async def find_stop_receipt(self, body):
@@ -1057,7 +1097,7 @@ class Engine:
                     "price": body["trigger"]["price"],
                     "created": row["created"],
                 }
-            for name in ("tp1", "tp2"):
+            for name in ("tp",):
                 if row["id"] == f"{trade['id']}:{name}:initial" and name not in trade["exits"]:
                     trade["exits"][name] = {
                         "id": str(result["id"]),
@@ -1081,45 +1121,59 @@ class Engine:
                 try:
                     self.recover_exits(trade)
                     await self.refresh(trade)
-                    sl = trade["exits"].get("sl")
-                    if sl and trade["status"] == "working":
-                        result = await self.gate.get(f"/price_orders/{sl['id']}")
-                        if result["status"] == "open" and time.time() - sl["created"] > 82800:
-                            await self.renew_stop(trade)
-                        if result["status"] != "open" and trade.get("position_size", 0):
-                            # Expiration/rejection is NOT interpreted as a request to close.
-                            # Re-arm only after a confirmed non-execution terminal status.
-                            if result.get("finish_as") == "expired":
-                                await self.renew_stop(trade)
-                            elif result.get("finish_as") == "succeeded":
-                                await self.close_trade(trade)
-                            else:
-                                raise Review("native stop no longer active; manual review required")
                     if trade.get("retired_stops") and trade["exits"].get("sl"):
                         await self.cancel_retired_stops(trade)
                     if trade.pop("last_error", None):
                         self.store.save_trade(trade)
-                except Exception as exc:  # noqa: BLE001 -- isolate each position and pause on any failure
+                except Exception as exc:  # noqa: BLE001 -- isolate failures; keep other positions managed
                     label = str(exc) if isinstance(exc, (Review, GateError)) else type(exc).__name__
+                    temporary = transient_exchange_error(exc)
+                    try:
+                        # Entry/TP detail reads and management writes must not
+                        # hide native SL execution or expiry. Revalidate current
+                        # ownership; never infer an outcome from the failed read.
+                        await self.maintain_stop(trade, verify_position=True)
+                    except Exception as protection_exc:  # noqa: BLE001 -- retain both failures
+                        temporary = temporary and transient_exchange_error(protection_exc)
+                        protection = (str(protection_exc)
+                                      if isinstance(protection_exc, (Review, GateError))
+                                      else type(protection_exc).__name__)
+                        if protection != label:
+                            label += "; native SL: " + protection
                     if trade.get("last_error") != label:
                         trade["last_error"] = label
                         self.store.save_trade(trade)
                         self.store.notice(f"Reconciliation {trade['symbol']}: {label}")
-                    self.pause("reconciliation requires review")
+                    if not temporary:
+                        self.pause("reconciliation blocked: " + label)
 
-    async def claim_plan(self):
+    async def claim_plan(self, request_id=None):
         async with self.lock:
-            for trade in self.active():
+            # A retry may recover only the version originally leased. In
+            # particular, intervening channel management cannot refresh it.
+            previous = next((t for t in self.store.trades()
+                             if request_id and t.get("plan_token") == request_id), None)
+            if previous:
+                try:
+                    self.plan_trade(previous["id"], previous.get("plan_version"), request_id)
+                except Review:
+                    return None
+                if previous["plan"] is not None:
+                    return None
+            for trade in [previous] if previous else self.active():
                 if (
                     trade["status"] == "working"
                     and trade["plan_needed"]
+                    and trade["plan"] is None
                     and trade["filled"]
-                    and trade["plan_lease"] < time.time()
+                    and (previous or trade["plan_lease"] < time.time())
                     and not trade.get("close_requested")
                 ):
-                    token = uuid.uuid4().hex
-                    trade.update(plan_token=token, plan_lease=time.time() + 120, plan_proposal=None)
-                    self.store.save_trade(trade)
+                    token = request_id or uuid.uuid4().hex
+                    if not previous:
+                        trade.update(plan_token=token, plan_lease=time.time() + 120,
+                                     plan_version=trade["version"])
+                        self.store.save_trade(trade)
                     job = {
                         "trade_id": trade["id"],
                         "version": trade["version"],
@@ -1134,9 +1188,29 @@ class Engine:
                         "confirmed_channel_stop": trade["exits"].get("sl")
                         if trade["source_sl"] else None,
                         "output_schema": Plan.model_json_schema(),
+                        "accepted_plan": trade.get("plan_proposal"),
                     }
+                    job["exit_policy"] = EXIT_POLICY
                     break
             else:
                 return None
-        job["candles_5m"] = await self.gate.candles(job["symbol"])
+        try:
+            if job["accepted_plan"] is None:
+                job["candles_5m"], job["candles_4h"] = await asyncio.gather(
+                    self.gate.candles(job["symbol"]),
+                    self.gate.candles(job["symbol"], interval="4h"),
+                )
+                if not job["candles_5m"] or not job["candles_4h"]:
+                    raise GateError(502, "CANDLES_UNAVAILABLE")
+            else:
+                job["candles_5m"], job["candles_4h"] = [], []
+        except (GateError, OSError, TimeoutError, ClientError) as exc:
+            # Nonce callers retry this lease. An earlier disconnected request
+            # must not revoke it after a later retry has received the job.
+            if request_id is None:
+                await self.fail_plan(
+                    job["trade_id"], job["version"], job["lease"],
+                    "market data unavailable: " + type(exc).__name__,
+                )
+            raise
         return job

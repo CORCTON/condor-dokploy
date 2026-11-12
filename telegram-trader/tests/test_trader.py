@@ -76,7 +76,9 @@ class Exchange:
                 status = "finished"
             else:
                 filled, status = 0, "open"
-            order = dict(body, id=key, left=quantity - filled, status=status, fill_price="10")
+            order = dict(body, id=key, left=quantity - filled, status=status, fill_price="10",
+                         is_reduce_only=body.get("reduce_only", False),
+                         is_close=body.get("close", False))
             self.orders[key] = order
             if self.lost_response:
                 self.lost_response = False
@@ -113,7 +115,7 @@ class Exchange:
         if path.startswith("/contracts/"):
             return dict(self.contract)
         if path.startswith("/positions/"):
-            return dict(self.position)
+            return dict(self.position, contract=path.rsplit("/", 1)[1])
         if path in {"/orders", "/price_orders"}:
             collection = self.stops if path == "/price_orders" else self.orders
             return [dict(o) for o in collection.values() if o["status"] == "open"]
@@ -129,8 +131,10 @@ class Exchange:
     async def market(self, symbol):
         return [{"lowest_ask": "10", "highest_bid": "10"}]
 
-    async def candles(self, symbol):
-        return [{"t": int(time.time()), "o": "10", "h": "11", "l": "9", "c": "10", "v": "1000"}]
+    async def candles(self, symbol, interval="5m"):
+        seconds = {"5m": 300, "4h": 14400}[interval]
+        now = int(time.time()) // seconds * seconds
+        return [{"t": now - seconds, "o": "10", "h": "11", "l": "9", "c": "10", "v": "1000"}]
 
 
 @pytest.fixture
@@ -153,7 +157,7 @@ async def signal(
         event = store.db.execute("SELECT * FROM events WHERE id=?", (key,)).fetchone()
         reference, _ = store.reply_lineage(event["channel"], reply)
         decision = parse(text, reference["symbol"].removesuffix("_USDT") if reference else None)
-        if decision.action not in {"open", "ignore", "review"}:
+        if decision.action not in {"open", "ignore", "ignore"}:
             matches = [t for t in engine.active() if t["symbol"] == decision.symbol + "_USDT"]
             if len(matches) == 1:
                 decision.target_trade_id = matches[0]["id"]
@@ -162,7 +166,7 @@ async def signal(
 
 
 def plan():
-    return Plan(sl="11", tp1="9", tp2="8", tp1_fraction="0.5", rationale="fixture levels")
+    return Plan(sl="11", tp="8", rationale="fixture levels")
 
 
 @pytest.mark.parametrize(
@@ -178,9 +182,9 @@ def plan():
         ("ARIA 利潤不錯，當前價格可以做TP1", "tp1", "ARIA"),
         ("#INJ SL放在8.75", "sl", "INJ"),
         ("#INJ 在8.63限价入场空单", "open", "INJ"),
-        ("#BTC #ETH 当前价格入场一笔多单", "review", None),
-        ("当前价格入场一笔多单", "review", None),
-        ("當前價格可以選擇全部止盈", "review", None),
+        ("#BTC #ETH 当前价格入场一笔多单", "ignore", None),
+        ("当前价格入场一笔多单", "ignore", None),
+        ("當前價格可以選擇全部止盈", "ignore", None),
     ],
 )
 def test_legacy_executor_fixture_labels(text, action, symbol):
@@ -276,8 +280,8 @@ async def test_partial_fill_is_not_ack_size(rig):
     await rig[2].propose_plan(job["trade_id"], job["version"], job["lease"], plan())
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     trade = rig[0].trade(trade["id"])
-    assert trade["exits"]["tp1"]["size"] == 3
-    assert trade["exits"]["tp2"]["size"] == 4
+    assert set(trade["exits"]) == {"sl", "tp"}
+    assert trade["exits"]["tp"]["size"] == 7
 
 
 async def test_lost_entry_response_reconciles_without_resend(rig):
@@ -404,7 +408,7 @@ async def test_plan_bad_levels_do_not_send_orders(rig):
             job["trade_id"],
             job["version"],
             job["lease"],
-            Plan(sl="9", tp1="11", tp2="12", tp1_fraction="0.5", rationale="bad"),
+            Plan(sl="9", tp="12", rationale="bad"),
         )
     assert len(rig[1].writes) == writes
 
@@ -464,19 +468,21 @@ async def test_tp_partial_ioc_completes_without_over_reduction(rig):
     await signal(rig, "INJ 当前价格做TP1", message=2)
     for _ in range(4):
         await rig[2].poll()
-    assert rig[1].position["size"] == -7
+    assert rig[1].position["size"] == 0
+    before = len(rig[1].writes)
     await signal(rig, "INJ 当前价格做TP1", message=3)
-    assert rig[1].position["size"] == -7
+    assert rig[1].position["size"] == 0
+    assert len(rig[1].writes) == before
 
 
 async def test_channel_tp_levels_override_plan_and_amend_orders(rig):
     await signal(rig)
-    await signal(rig, "INJ TP1: 9.50 TP2: 8.50 SL: 10.50", message=2)
+    await signal(rig, "INJ TP1: 9.50 SL: 10.50", message=2)
     job = await rig[2].claim_plan()
     await rig[2].propose_plan(job["trade_id"], job["version"], job["lease"], plan())
     await rig[2].apply_plan(job["trade_id"], job["version"], job["lease"], plan())
     assert rig[1].orders["2"]["price"] == "9.50"
-    assert rig[1].orders["3"]["price"] == "8.50"
+    assert len(rig[1].orders) == 2
     await signal(rig, "INJ TP1: 9.40", message=3)
     assert rig[1].orders["2"]["price"] == "9.40"
 
@@ -494,8 +500,8 @@ async def test_later_limit_fills_resize_exits(rig):
     entry["status"] = "finished"
     rig[1].position["size"] = -14
     await rig[2].poll()
-    assert rig[1].orders["2"]["size"] == 7
-    assert rig[1].orders["3"]["size"] == 7
+    assert rig[1].orders["2"]["size"] == 14
+    assert len(rig[1].orders) == 2
 
 
 async def test_stop_renewal_creates_before_cancelling(rig):
@@ -532,7 +538,7 @@ async def test_no_model_call_can_change_leverage(rig):
 
 @pytest.mark.parametrize("text", ["#INJ 不要入场空单 当前价格", "#INJ 取消当前价格入场一笔空单"])
 def test_negated_entries_do_not_open(text):
-    assert parse(text).action == "review"
+    assert parse(text).action == "ignore"
 
 
 @pytest.mark.parametrize(
@@ -564,11 +570,13 @@ async def test_no_action_messages_have_zero_exchange_writes(rig, text):
         "当前价格可以选择全部止盈",
     ],
 )
-async def test_unresolved_actions_not_silently_ignored(rig, text):
+async def test_unresolved_actions_are_ignored_with_reason_without_review_queue(rig, text):
     await signal(rig, text)
     assert not rig[1].writes
-    assert rig[0].db.execute("SELECT status FROM events").fetchone()[0] == "review"
-    assert rig[0].db.execute("SELECT COUNT(*) FROM notices").fetchone()[0] == 1
+    row = rig[0].db.execute("SELECT status,detail FROM events").fetchone()
+    assert row["status"] == "ignore" and row["detail"]
+    assert rig[0].db.execute("SELECT COUNT(*) FROM notices").fetchone()[0] == 0
+    assert not rig[2].paused()
 
 
 async def test_combined_addon_and_stop_only_changes_stop(rig):
@@ -594,7 +602,7 @@ async def test_entry_age_limit_uses_publication_time(rig, monkeypatch, delay, pr
     if delay <= 60:
         assert len(exchange.orders) == 1 and event["status"] == "done"
     else:
-        assert not exchange.writes and event["status"] == "review"
+        assert not exchange.writes and event["status"] == "error"
         assert "60 seconds" in event["detail"]
 
 
@@ -692,7 +700,7 @@ async def test_native_stop_complete_lifecycle(rig, side):
     trade = await signal(rig, f"#INJ 当前价格入场一笔{direction}单")
     job = await rig[2].claim_plan()
     exit_plan = (
-        Plan(sl="9", tp1="11", tp2="12", tp1_fraction="0.5", rationale="fixture")
+        Plan(sl="9", tp="12", rationale="fixture")
         if side == "long"
         else plan()
     )

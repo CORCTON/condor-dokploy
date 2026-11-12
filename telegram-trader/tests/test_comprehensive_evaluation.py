@@ -65,12 +65,12 @@ def test_decision_oracle_rejects_wrong_owned_target(action):
 
 
 @pytest.mark.parametrize("mutation", [
-    {"levels": {"sl": "11.1", "tp1": "9", "tp2": "8"}},
-    {"levels": {"sl": "11", "tp1": "8", "tp2": "9"}},
-    {"levels": {"sl": "11", "tp1": "9"}},
+    {"levels": {"sl": "11.1", "tp": "9"}},
+    {"levels": {"sl": "11", "tp": "8"}},
+    {"levels": {"sl": "11"}},
 ])
 def test_decision_oracle_rejects_wrong_or_missing_exact_levels(mutation):
-    expected = {"action": "targets", "target": "A", "levels": {"sl": "11", "tp1": "9", "tp2": "8"}}
+    expected = {"action": "targets", "target": "A", "levels": {"sl": "11", "tp": "9"}}
     actual = model_decision("targets", target_trade_id="owned", levels=expected["levels"])
     evaluation.assert_decision(actual, expected, {"A": {"id": "owned"}}, {1: {}})
     with pytest.raises(AssertionError):
@@ -81,7 +81,7 @@ def test_decision_oracle_rejects_wrong_or_missing_exact_levels(mutation):
     (trade(), -20, 0, True),
     (trade(limit="10", market="9", fill=0), 0, 20, False),
     (trade(limit="10", market="9", fill=4), -4, 16, True),
-    (trade(tp1_done=True), -10, 0, True),
+    (trade(tp_done=True), 0, 0, True),
 ])
 async def test_seed_creates_the_declared_owned_state(rig, fixture, position, remaining, planned):
     store, exchange, engine = rig
@@ -93,9 +93,11 @@ async def test_seed_creates_the_declared_owned_state(rig, fixture, position, rem
     assert exchange.positions["INJ_USDT"]["lever"] == "10"
     assert exchange.positions["INJ_USDT"]["pos_margin_mode"] == "isolated"
     assert exchange.orders[owned["entry_id"]]["left"] == remaining
-    assert all(owned["exits"].get(name, {}).get("id") for name in ("sl", "tp1", "tp2")) is planned
-    if fixture.get("tp1_done"):
-        assert owned["exits"]["tp1"]["done"]
+    assert all(owned["exits"].get(name, {}).get("id") for name in ("sl", "tp")) is planned
+    if fixture.get("tp_done"):
+        assert owned["status"] == "closed"
+        assert exchange.orders[owned["exits"]["tp"]["id"]]["left"] == 0
+        assert exchange.stops[owned["exits"]["sl"]["id"]]["status"] == "finished"
     assert not store.unknowns()
 
 
@@ -110,6 +112,8 @@ async def effect_fixture(rig, action="sl"):
     event_id = store.event(evaluation.CHANNEL, 20000, "scripted management", 100, 1, True)
     event = store.db.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
     await engine.process(event, Signal(action=action, target_trade_id=owned["id"], **fields))
+    for _ in range(3):
+        await engine.poll()
     actual = model_decision(action, target_trade_id=owned["id"], **fields)
     expected = dict(action=action, target="A", **({"sl": "10.75"} if action == "sl" else {}))
     spec = {"expected": [expected]}
@@ -123,7 +127,7 @@ async def test_effect_oracle_rejects_tp_reversing_the_remaining_position(rig):
     args, snapshots = await effect_fixture(rig, "tp1")
     evaluation.assert_effects(*args, **snapshots)
     exchange = rig[1]
-    assert exchange.positions["INJ_USDT"]["size"] == -10
+    assert exchange.positions["INJ_USDT"]["size"] == 0
     exchange.positions["INJ_USDT"]["size"] = 10
     with pytest.raises(AssertionError):
         evaluation.assert_effects(*args, **snapshots)
@@ -133,45 +137,46 @@ async def test_tp_quantity_oracle_is_frozen_before_execution(rig):
     args, snapshots = await effect_fixture(rig, "tp1")
     evaluation.assert_effects(*args, **snapshots)
     exchange, original = rig[1], args[4]["A"]
-    assert snapshots["before_orders"][original["exits"]["tp1"]["id"]]["left"] == 10
-    # Simulate an erroneous five-contract TP and a consistently resized remainder.
+    assert snapshots["before_orders"][original["exits"]["tp"]["id"]]["left"] == 20
+    # Simulate an erroneous five-contract TP instead of the required full close.
     # Reading the expected amount from the mutated old receipt would accept this.
-    exchange.orders[original["exits"]["tp1"]["id"]]["size"] = 5
+    exchange.orders[original["exits"]["tp"]["id"]]["size"] = 5
     exchange.positions["INJ_USDT"]["size"] = -15
-    exchange.orders[original["exits"]["tp2"]["id"]].update(size=15, left=15)
     with pytest.raises(AssertionError):
         evaluation.assert_effects(*args, **snapshots)
 
 
 @pytest.mark.parametrize("side", ["long", "short"])
-@pytest.mark.parametrize("mutation", ["sl_price", "tp1_price", "tp2_price", "sl_rule", "tp_side", "contract"])
+@pytest.mark.parametrize("mutation", ["sl_price", "tp_price", "tp_size", "sl_rule", "tp_side", "contract"])
 async def test_initial_plan_oracle_rejects_native_price_direction_or_contract_changes(rig, side, mutation):
     _, exchange, engine = rig
     owned = await evaluation.seed(engine, exchange, trade(side=side))
     evaluation.assert_initial_plan(owned, owned["plan"], exchange)
     stop = exchange.stops[owned["exits"]["sl"]["id"]]
-    tp1 = exchange.orders[owned["exits"]["tp1"]["id"]]
+    target = exchange.orders[owned["exits"]["tp"]["id"]]
     if mutation == "sl_price":
         stop["trigger"]["price"] = "10.75"
-    elif mutation in {"tp1_price", "tp2_price"}:
-        exchange.orders[owned["exits"][mutation.removesuffix("_price")]["id"]]["price"] = "7.77"
+    elif mutation == "tp_price":
+        target["price"] = "7.77"
+    elif mutation == "tp_size":
+        target["size"] += -1 if target["size"] > 0 else 1
     elif mutation == "sl_rule":
         stop["trigger"]["rule"] = 3 - stop["trigger"]["rule"]
     elif mutation == "tp_side":
-        tp1["size"] *= -1
+        target["size"] *= -1
     else:
-        tp1["contract"] = "OTHER_USDT"
+        target["contract"] = "OTHER_USDT"
     with pytest.raises(AssertionError):
         evaluation.assert_initial_plan(owned, owned["plan"], exchange)
 
 
-async def test_initial_plan_oracle_accepts_zero_first_allocation_but_no_extra_order(rig):
+async def test_initial_plan_oracle_accepts_one_contract_target_but_no_extra_exit(rig):
     _, exchange, engine = rig
     owned = await evaluation.seed(engine, exchange, trade(limit="10", market="9", fill=1))
-    assert "tp1" not in owned["exits"]
+    assert owned["exits"]["tp"]["size"] == 1
     evaluation.assert_initial_plan(owned, owned["plan"], exchange)
-    owned["exits"]["tp1"] = deepcopy(owned["exits"]["tp2"])
-    with pytest.raises(AssertionError, match="Zero allocation"):
+    owned["exits"]["tp2"] = deepcopy(owned["exits"]["tp"])
+    with pytest.raises(AssertionError):
         evaluation.assert_initial_plan(owned, owned["plan"], exchange)
 
 
@@ -179,7 +184,7 @@ async def test_effect_oracle_rejects_unrequested_tp_change_during_sl_amendment(r
     args, snapshots = await effect_fixture(rig)
     evaluation.assert_effects(*args, **snapshots)
     original = args[4]["A"]
-    rig[1].orders[original["exits"]["tp1"]["id"]]["price"] = "8.50"
+    rig[1].orders[original["exits"]["tp"]["id"]]["price"] = "8.50"
     with pytest.raises(AssertionError):
         evaluation.assert_effects(*args, **snapshots)
 
@@ -187,7 +192,7 @@ async def test_effect_oracle_rejects_unrequested_tp_change_during_sl_amendment(r
 async def test_effect_oracle_rejects_review_status_for_expected_successful_management(rig):
     args, snapshots = await effect_fixture(rig)
     evaluation.assert_effects(*args, **snapshots)
-    args[-1][0]["status"] = "review"
+    args[-1][0]["status"] = "ignore"
     with pytest.raises(AssertionError):
         evaluation.assert_effects(*args, **snapshots)
 
@@ -226,7 +231,7 @@ async def test_effect_oracle_rejects_any_exchange_write_for_noop(rig):
 @pytest.mark.parametrize("invalid_row", [
     {"status": "done", "detail": "misreported success"},
     {"status": "ignore", "detail": "wrong execution outcome"},
-    {"status": "review", "detail": ""},
+    {"status": "ignore", "detail": ""},
 ])
 async def test_guarded_case_requires_explicit_rejection_not_done_or_silent_ignore(rig, invalid_row):
     _, exchange, engine = rig
@@ -234,7 +239,7 @@ async def test_guarded_case_requires_explicit_rejection_not_done_or_silent_ignor
     before = deepcopy(exchange.positions)
     spec = {"name": "derived_old_entry_age_guard", "execution_review": True,
             "expected": [{"action": "open", "symbol": "INJ", "side": "short", "price": None}]}
-    rows = [{"status": "review", "detail": "entry signal older than 60 seconds; no new entry"}]
+    rows = [{"status": "error", "detail": "entry signal older than 60 seconds; no new entry"}]
     args = spec, [model_decision(symbol="INJ", side="short")], before, exchange.positions, {}, engine, exchange, rows
     evaluation.assert_effects(*args)
     rows[0] = invalid_row
@@ -257,10 +262,10 @@ SMOKES = [
     ("derived_amend_SL", {"action": "sl", "target_symbol": "INJ_USDT", "price": "10.75"}),
     ("local_TP1", {"action": "tp1", "target_symbol": "INJ_USDT"}),
     ("derived_negated_close", {"action": "ignore"}),
-    ("derived_opposite_entry_without_close", {"action": "review"}),
+    ("derived_opposite_entry_without_close", {"action": "ignore"}),
     ("derived_opposite_entry_without_close", {"action": "open", "symbol": "INJ", "side": "short"}),
-    ("derived_close_then_reverse_compound", {"action": "review"}),
-    ("derived_unsupported_TP3_price_update", {"action": "review"}),
+    ("derived_close_then_reverse_compound", {"action": "ignore"}),
+    ("derived_unsupported_TP3_price_update", {"action": "ignore"}),
 ]
 
 
@@ -376,7 +381,7 @@ async def test_image_fixture_names_never_leak_into_model_job(monkeypatch, interp
     ("derived_opposite_entry_without_close", {"action": "open", "symbol": "INJ", "side": "long"}),
     ("derived_close_then_reverse_compound", {"action": "close"}),
     ("derived_unsupported_TP3_price_update", {"action": "targets", "levels": {"tp2": "7.50"}}),
-    ("derived_unsupported_TP3_price_update", {"action": "ignore"}),
+    ("derived_unsupported_TP3_price_update", {"action": "close"}),
 ])
 async def test_oracles_reject_wrong_direction_partial_instruction_or_unsupported_target_mapping(
     monkeypatch, interpreter, name, fields,
@@ -451,7 +456,7 @@ async def test_harness_applies_signal_and_plan_before_each_model_cleanup(
         async with aiohttp.ClientSession() as session:
             await actual_api(session, "POST", "/plans/proposals", json={
                 "trade_id": job["trade_id"], "version": job["version"], "lease": job["lease"],
-                "plan": {"sl": "11", "tp1": "9", "tp2": "8", "tp1_fraction": "0.5", "rationale": "local lifecycle self-test"},
+                "plan": {"sl": "11", "tp": "8", "rationale": "local lifecycle self-test"},
             })
         try:
             await asyncio.Event().wait()

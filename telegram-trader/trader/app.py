@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import time
+import uuid
 from pathlib import Path
 
 import aiohttp
@@ -13,13 +14,25 @@ from aiohttp import web
 
 from .channel import READ_TIMEOUT_SECONDS, ChannelReader, describe_message
 from .credentials import load_credentials
-from .engine import Engine, Review
+from .engine import Engine, Review, transient_exchange_error
 from .gate import Gate, GateError
 from .models import Decisions, Plan
 from .signals import SignalInbox
 from .store import Store
 
 log = logging.getLogger("trader")
+
+
+def claim_request_id(request):
+    value = request.headers.get("X-Claim-ID")
+    if value is not None:
+        try:
+            valid = uuid.UUID(value).hex == value
+        except ValueError:
+            valid = False
+        if not valid:
+            raise web.HTTPBadRequest(text="X-Claim-ID must be a lowercase UUID hex string")
+    return value
 
 
 def missing_config(credentials=None):
@@ -63,7 +76,9 @@ def business_readiness(engine, credentials=None):
         if engine.store.unknowns():
             reasons.append("exchange_write_unconfirmed")
         if any(trade.get("last_error") for trade in engine.active()):
-            reasons.append("position_requires_review")
+            reasons.append("position_reconciliation_failed")
+        if engine._entry_blockers:
+            reasons.append("dependency_unavailable")
     return {
         "ready": not reasons,
         "state": "disabled" if not engine.enabled else ("degraded" if reasons else "ready"),
@@ -113,9 +128,14 @@ def make_app(engine, channel=None, credentials=None):
         return web.json_response(result, status=200 if result["ready"] else 503)
 
     async def status(request):
-        last_review = engine.store.db.execute(
+        last_issue = engine.store.db.execute(
             "SELECT message AS message_id,received AS received_at,detail AS reason "
-            "FROM events WHERE status='review' ORDER BY received DESC,rowid DESC LIMIT 1"
+            "FROM events WHERE status IN ('review','error') "
+            "ORDER BY received DESC,rowid DESC LIMIT 1"
+        ).fetchone()
+        last_ignored = engine.store.db.execute(
+            "SELECT message AS message_id,received AS received_at,detail AS reason "
+            "FROM events WHERE status='ignore' ORDER BY received DESC,rowid DESC LIMIT 1"
         ).fetchone()
         return web.json_response(
             {
@@ -129,7 +149,9 @@ def make_app(engine, channel=None, credentials=None):
                 ),
                 "entries_started_after": engine.store.get("entries_started_after"),
                 "pause_scope": "停止提交新开仓；已有仓位继续管理；已提交的订单不自动撤销，仍可能成交。",
-                "pause_reason": engine.store.get("pause_reason", "activation required"),
+                "pause_reason": engine.pause_reason(),
+                "pause_latched": engine.store.get("paused", True),
+                "temporary_entry_blocks": engine.entry_blockers(),
                 "listener_ready": engine.listener_ready,
                 "missing": missing_config(credentials),
                 "credentials": credentials.status() if credentials else None,
@@ -141,7 +163,8 @@ def make_app(engine, channel=None, credentials=None):
                     "WHERE status IN ('queued','deferred','analyzing','processing')"
                 ).fetchone()[0],
                 "unknown_writes": len(engine.store.unknowns()),
-                "last_review": dict(last_review) if last_review else None,
+                "last_issue": dict(last_issue) if last_issue else None,
+                "last_ignored": dict(last_ignored) if last_ignored else None,
                 "trades": [
                     {
                         k: t.get(k)
@@ -179,8 +202,9 @@ def make_app(engine, channel=None, credentials=None):
         return await status(request)
 
     async def jobs(request):
+        request_id = claim_request_id(request)
         engine.record_heartbeat("planner")
-        return web.json_response(await engine.claim_plan() if engine.enabled else None)
+        return web.json_response(await engine.claim_plan(request_id) if engine.enabled else None)
 
     async def worker_heartbeat(request):
         worker = request.match_info["worker"]
@@ -221,8 +245,9 @@ def make_app(engine, channel=None, credentials=None):
         )
 
     async def signal_jobs(request):
+        request_id = claim_request_id(request)
         engine.record_heartbeat("interpreter")
-        return web.json_response(await inbox.claim())
+        return web.json_response(await inbox.claim(request_id))
 
     async def signal_fresh(request):
         return web.json_response({"fresh": inbox.fresh(request.match_info["lease"])})
@@ -396,6 +421,7 @@ async def listen(engine, channel):
                 client, peer, cursor, engine, channel_id, live_since, ingress_lock
             )
             engine.listener_ready = True
+            engine._entry_blockers.pop("listener", None)
             log.info("Channel listener ready; push enabled; new-message reconciliation every 3s")
             tail = asyncio.create_task(
                 follow_new_messages(
@@ -414,12 +440,16 @@ async def listen(engine, channel):
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 -- listener boundary must fail closed
-            engine.pause("Telegram listener disconnected/not authorized")
+            if isinstance(exc, Review):
+                engine.pause("Telegram listener configuration invalid")
+            else:
+                engine._entry_blockers["listener"] = "Telegram listener disconnected"
             log.warning("Telegram listener: %s", type(exc).__name__)
             if isinstance(exc, FloodWaitError):
                 await asyncio.sleep(exc.seconds)
         finally:
             engine.listener_ready = False
+            engine._entry_blockers["listener"] = "Telegram listener disconnected"
             channel.client, channel.peer = None, None
             await client.disconnect()
         await asyncio.sleep(5)
@@ -568,9 +598,13 @@ async def reconcile(engine):
         if engine.gate.ready:
             try:
                 await engine.poll()
+                engine._entry_blockers.pop("reconcile", None)
                 engine.last_reconcile = time.monotonic()
             except Exception as exc:  # noqa: BLE001 -- pause new risk on any reconciliation failure
-                engine.pause("exchange reconciliation disconnected")
+                if transient_exchange_error(exc):
+                    engine._entry_blockers["reconcile"] = "exchange reconciliation disconnected"
+                else:
+                    engine.pause("exchange reconciliation failed: " + type(exc).__name__)
                 log.warning("Reconciliation: %s", type(exc).__name__)
         await asyncio.sleep(2)
 

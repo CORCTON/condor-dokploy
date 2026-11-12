@@ -190,8 +190,7 @@ async def test_two_contract_engine_lifecycle_and_native_stop_leave_other_trade_u
             await engine.process(event, Signal(action="open", symbol=symbol, side="long"))
         for values in (("9", "11", "12"), ("1.9", "2.1", "2.2")):
             job = await engine.claim_plan()
-            proposal = Plan(sl=values[0], tp1=values[1], tp2=values[2],
-                            tp1_fraction="0.5", rationale="local fixture protocol verification")
+            proposal = Plan(sl=values[0], tp=values[2], rationale="local fixture protocol verification")
             args = (job["trade_id"], job["version"], job["lease"], proposal)
             await engine.propose_plan(*args)
             await engine.apply_plan(*args)

@@ -52,7 +52,7 @@ PRIMARY_CASES = CASES[4:8] + [SUI_COST]
 
 
 @pytest.mark.parametrize("spec", CASES[:4], ids=lambda spec: spec["name"])
-@pytest.mark.parametrize("action", ["ignore", "review"])
+@pytest.mark.parametrize("action", ["ignore"])
 async def test_noop_preserves_owned_entry_position_and_native_protection(
     spec, action, interpreter, monkeypatch,
 ):
@@ -88,10 +88,9 @@ async def test_noop_preserves_owned_entry_position_and_native_protection(
     else:
         assert_context_report(spec, report)
     owned = report["owned_before"]["A"]
-    assert owned["filled"] > 0 and set(owned["exits"]) == {"sl", "tp1", "tp2"}
+    assert owned["filled"] > 0 and set(owned["exits"]) == {"sl", "tp"}
     assert exchange.stops[owned["exits"]["sl"]["id"]]["status"] == "open"
-    assert all(exchange.orders[owned["exits"][key]["id"]]["status"] == "open"
-               for key in ("tp1", "tp2"))
+    assert exchange.orders[owned["exits"]["tp"]["id"]]["status"] == "open"
     entry = exchange.orders[owned["entry_id"]]
     if mid == 15355:
         assert owned["filled"] == 4 and entry["status"] == "open" and entry["left"] > 0
@@ -115,9 +114,9 @@ def test_context_oracles_reject_unintended_actions(spec, action):
 
 
 @pytest.mark.parametrize("spec,action", [
-    (CASES[4], "close"), (CASES[5], "ignore"), (CASES[6], "close"), (CASES[7], "tp1"),
-    (SUI_COST, "sl"), (SUI_COST, "targets"), (HYPE_REVIEW, "review"),
-], ids=["JUP-close", "SUI-hold", "RAY-close", "INJ-tp1", "SUI-sl", "SUI-targets", "HYPE-review"])
+    (CASES[4], "close"), (CASES[5], "ignore"), (CASES[6], "close"), (CASES[7], "close"),
+    (SUI_COST, "sl"), (SUI_COST, "targets"), (HYPE_REVIEW, "ignore"),
+], ids=["JUP-close", "SUI-hold", "RAY-close", "INJ-tp1-full-close", "SUI-sl", "SUI-targets", "HYPE-review"])
 async def test_user_authorized_primary_recommendation_has_exact_owned_effect(
     spec, action, interpreter, monkeypatch,
 ):
@@ -140,7 +139,7 @@ async def test_user_authorized_primary_recommendation_has_exact_owned_effect(
     fields = {"event_id": f"{evaluation.CHANNEL}:{mid}:offline", "action": action,
               "reason": "Scripted 2026-10-25 operator-policy regression; no model inference",
               "evidence_message_ids": [mid]}
-    if action not in {"ignore", "review"}:
+    if action not in {"ignore"}:
         fields["target_trade_id"] = sha256(
             f"{evaluation.CHANNEL}:{fixture['source']}".encode(),
         ).hexdigest()[:24]
@@ -162,15 +161,10 @@ async def test_user_authorized_primary_recommendation_has_exact_owned_effect(
     position = report["positions_after"][before["symbol"]]
     if action == "close":
         assert position["size"] == 0 and after["status"] == "closed"
-    elif action == "tp1":
-        assert 0 < abs(position["size"]) < before["filled"]
-        assert after["exits"]["tp1"]["done"] is True
-        assert not after["exits"]["tp2"].get("done", False)
     elif action in {"sl", "targets"}:
         assert abs(position["size"]) == before["filled"]
         assert after["entry_price"] == after["channel_levels"]["sl"] == "0.8192"
-        assert after["exits"]["tp1"] == before["exits"]["tp1"]
-        assert after["exits"]["tp2"] == before["exits"]["tp2"]
+        assert after["exits"]["tp"] == before["exits"]["tp"]
         assert not any(method == "POST" and path == "/orders"
                        for method, path, _body, _params in exchange.writes)
     else:
@@ -179,7 +173,7 @@ async def test_user_authorized_primary_recommendation_has_exact_owned_effect(
 
 @pytest.mark.parametrize("spec,action", [
     (spec, action) for spec in PRIMARY_CASES + [HYPE_REVIEW]
-    for action in ("ignore", "review", "close", "tp1", "sl", "targets")
+    for action in ("ignore", "ignore", "close", "tp1", "sl", "targets")
     if action not in (spec["expected"][0]["action"] if isinstance(
         spec["expected"][0]["action"], list) else [spec["expected"][0]["action"]])
 ], ids=lambda value: value["name"] if isinstance(value, dict) else value)

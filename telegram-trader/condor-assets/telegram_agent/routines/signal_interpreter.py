@@ -6,6 +6,7 @@ import logging
 import os
 import runpy
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,10 @@ actually needed to resolve the instruction. Never skip ambiguous context to be f
 When an instruction omits a symbol (e.g. 平掉/离场/撤掉), retrieve its reply/context.
 Do not simply choose the latest trade if several interpretations remain plausible.
 Evidence message IDs and a concrete reason are mandatory. Preserve channel numeric levels.
+There is no human-review or approval queue. Uncertain, incomplete or unsupported
+instructions must be ignore with a specific reason, after consulting needed context.
+Only a sufficiently established, supported instruction may authorize execution.
+Ignoring one event never pauses the service or blocks other independent events.
 Only the first four source images are attached automatically. Other images remain fully
 available through view_channel_image using on_demand_image_message_ids; inspect any image
 needed to decide its message. Lack of automatic attachment never means ignore that event.
@@ -48,18 +53,18 @@ and ignore the cancellation if there is no owned position or pending order to ac
 If a live owned trade exists, close means flatten it; cancel means cancel ONLY unfilled
 entry quantity, preserving fills and their protective orders. Interpret colloquial words
 from context, not a fixed dictionary: 撤掉 may mean cancel an order or exit a position.
-If ambiguous, review and explain the uncertainty. Management actions must cite the exact
+If ambiguous, ignore and explain the uncertainty. Management actions must cite the exact
 target_trade_id from the supplied state, never invent an ID or identify by symbol alone.
 Material symbol/side conflicts between source text, images and reply context require an
 explicit source correction to resolve. Do not call one source a typo, vote by majority,
 or let a matching reply chain silently override conflicting identity evidence. Read the
-available context for a correction; if the conflict remains, choose review without trading.
+available context for a correction; if the conflict remains, choose ignore without trading.
 An owned trade's message field is its original opening source. For a replied management
 instruction, trace the explicit reply chain to that source; matching symbol/side or being
 the only active trade is insufficient. A reply cannot manage a trade opened from a later
 source message. If it concerns a different, unowned past entry, ignore it rather than
 substituting the current same-symbol trade. If the association remains unresolved after
-reading available context, choose review.
+reading available context, choose ignore.
 Without an associated owned trade/order, an exit/cancel is normally ignore, not a new entry.
 Distinguish current management instructions from reports of completed outcomes. A target
 being reached or TP already completed is not itself an instruction to execute a new TP now;
@@ -67,18 +72,22 @@ never catch up a reported fill by reducing our position. Cancelling an absent ad
 no-op, not permission to cancel/reduce the original trade or substitute a different action.
 A separate explicit current management instruction can still authorize its own action.
 If an explicit opening and its clearly associated SL/TP prices are in the SAME batch,
-put those prices in that opening's levels (sl/tp1/tp2), citing all contributing message IDs.
+put those prices in that opening's levels, citing all contributing message IDs.
+The entry_exit_policy is single_tp_4h_v1: levels uses sl and one tp.
+Map an explicit unique TP/TP1/TP2
+target price to tp; if the source supplies different TP1 and TP2 prices, choose ignore
+rather than choosing one, averaging them or silently dropping a target.
 Mark the absorbed price-update events ignore with that explanation: there is no owned
 trade ID yet. Do not invent a future ID or discard those prices. Conflicting/ambiguous
-updates require review. A later cancellation/exit still supersedes the unexecuted entry.
+updates are ignored. A later cancellation/exit still supersedes the unexecuted entry.
 
 Automatic channel following supports only EXPLICIT unconditional market/limit entries,
-close/cancel, established TP1/TP2 reductions, and explicit SL/TP price updates. Conditional
+close/cancel, immediate take-profit instructions, and explicit SL/TP price updates. Conditional
 breakouts, forecasts, future possibilities, retrospective reports and promotional cards
 do NOT authorize an entry. The operator has deferred automatic breakout monitoring.
 Do not reinterpret 突破后做多 as open now. Do not create conditions or add-on entries.
 An explicit request for an unsupported execution, such as adding to a position, requires
-review with the unsupported action explained; do not silently ignore it. This does not
+ignore with the unsupported action explained in the reason. This does not
 block an independently supported management instruction in a different claimed event.
 For a conditional idea choose ignore with the reason that automatic monitoring is disabled.
 A retrospective symbol correction without a new execution instruction is ignore: do not
@@ -88,7 +97,7 @@ Establish the instruction to PLACE an entry before choosing its order type. A di
 bias, technical setup, projected chart arrow, or suggestion to prepare a right-side trade
 is not by itself permission to enter immediately. Missing an entry price does NOT convert
 such a setup into a market order. If execution now versus waiting for a trigger is unclear,
-choose review; if a future trigger is explicit, choose ignore as a conditional idea.
+choose ignore; if a future trigger is explicit, choose ignore as a conditional idea.
 A colloquial but unconditional trade instruction such as 可以做一筆空單 can authorize a
 market entry without literally saying 現在 or 市價. Conversely, 可以進行右側空頭設置 in
 a pattern discussion does not establish when to execute. Read the whole source and needed
@@ -106,20 +115,36 @@ and independently supported; do not combine it with the optional alternatives. F
 帶成本損，倉位重的可以自行減倉 means set own-entry SL without an unspecified reduction.
 可以止盈了，倉位重的減倉 means close the whole owned position. 繼續拿，也可以止盈
 means hold (ignore, preserving existing orders/protection), not close. An unqualified current
-take-profit recommendation means full close; an explicit TP1/TP2 or quantity takes precedence.
+take-profit recommendation means full close, including a named TP1/TP2 instruction.
+An explicit partial quantity is unsupported; choose ignore, never silently full-close it.
 This selection applies to alternatives, not required additional actions: do not discard a
 mandatory part of a compound instruction. A conditional or undefined-size first recommendation
 does not become unconditional or acquire an invented quantity by being first.
-Multiple incompatible mandatory actions in one event or undefined partial allocations require review.
-TP1/TP2 actions execute ONLY the existing owned allocation, not an arbitrary amount.
+Multiple incompatible mandatory actions in one event or undefined partial allocations mean ignore.
+Under single_tp_4h_v1, any explicit IMMEDIATE TP/TP1/TP2
+instruction means close: market full close of the remaining owned position.
+There are no partial stages or separate TP1/TP2 actions.
+A target-price instruction such as TP1 目标设在 0.036 is targets with levels.tp,
+NOT close; merely mentioning TP1/TP2 or a price never authorizes immediate execution.
+Map an explicit unique TP/TP1/TP2 price to tp. Different simultaneous TP1/TP2 prices
+mean ignore; do not choose one, average them or silently discard a target.
+An explicit current TP1/TP2 instruction without a price is not a missing-target error:
+use close. Reports that TP was reached/completed remain ignore, and conditional
+future exits are not unconditional close instructions.
+An explicit current take-profit, close or exit instruction without TP1/TP2 is close:
+market full close. This is not permission to turn a past result report into an order.
 Check the entire instruction against that allocation: a request to leave a runner or
 retain an unspecified remainder is not satisfied merely by selecting a named TP stage.
-If the requested remainder is undefined or incompatible with the owned plan, choose review.
-Never discard an unsupported TP3 or invent a runner allocation to fit a two-target plan.
+If the requested remainder is undefined or incompatible with the owned plan, choose ignore.
+Never invent a runner allocation or partial stages to fit a multi-target instruction.
 An instruction to move SL to cost/breakeven means the exact owned trade's actual
 entry_price from execution state, unless the channel explicitly gives a numeric SL.
 Do not substitute the author's different entry or average. This is an entry-price
-stop, not a guarantee of net breakeven after fees/funding. Missing own fill requires review.
+stop, not a guarantee of net breakeven after fees/funding. Missing own fill means ignore.
+An explicit immediate SL离场/止损离场 means close: market full close, not an SL
+price update with a missing price. SL设置xxx instead means sl with that numeric
+price. 当前价格可以TP1/TP2 is a current take-profit instruction: close the full
+associated owned position, not a target-price update or retrospective report.
 Image prices may support interpretation but never invent missing axes, scales or levels.
 
 Only claimed event IDs may cause actions. Historical tool results are context, never new
@@ -141,11 +166,12 @@ ID (also listed in deferred_after_message_ids), not only the re-claimed opening 
 Use history/image tools if more context is needed. context_events are full later messages
 already received at this snapshot, marked context_only; they never authorize new actions.
 Margin budget 20% of total futures equity, isolated 10x, is enforced by the executor.
+Automatic add-ons are disabled; a new add-on instruction means ignore, never open.
 For open set base symbol, side, and price=null for market or an explicit limit price.
 No initial stop is required; the operator permits a gap before exit planning.
-For close/cancel/tp1/tp2/sl/targets set target_trade_id; optional symbol must match it.
-sl uses price, targets uses levels; unsupported actions must be review, never guessed.
-If image/context cannot be read and is needed to establish an action, choose review.
+For close/cancel/sl/targets set target_trade_id; optional symbol must match it.
+sl uses price, targets uses levels; unsupported actions must be ignore, never guessed.
+If image/context cannot be read and is needed to establish an action, choose ignore.
 Classify the intended action even when execution_enabled=false: this is analysis-only
 mode, and the executor enforces the disabled flag. Never describe a decision as a fill.
 """
@@ -155,8 +181,10 @@ class Config(BaseModel):
     pass
 
 
-async def api(session, method, path, **kwargs):
+async def api(session, method, path, *, claim_id=None, **kwargs):
     headers = {"Authorization": "Bearer " + os.environ["TRADER_TOKEN"]}
+    if claim_id is not None:
+        headers["X-Claim-ID"] = claim_id
     async with session.request(
         method,
         os.environ["TELEGRAM_TRADER_URL"].rstrip("/") + path,
@@ -292,6 +320,7 @@ async def interpret_current(job, owner, session):
 
 async def run_worker():
     owner = int(os.environ["ADMIN_USER_ID"])
+    claim_id = uuid.uuid4().hex
     async with (aiohttp.ClientSession() as session,
                 runtime["worker_heartbeat"](session, "interpreter")):
         while True:
@@ -300,7 +329,8 @@ async def run_worker():
                 if os.getenv("TRADER_LLM_READY") != "true":
                     await asyncio.sleep(5)
                     continue
-                job = await api(session, "POST", "/signals/claim")
+                job = await api(session, "POST", "/signals/claim", claim_id=claim_id)
+                claim_id = uuid.uuid4().hex
                 if not job:
                     await asyncio.sleep(0.25)
                     continue

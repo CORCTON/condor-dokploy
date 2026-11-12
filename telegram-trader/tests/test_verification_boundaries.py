@@ -106,7 +106,7 @@ async def test_verification_edit_cannot_restore_a_blocked_entry(inbox, guard):
         row = inbox.store.db.execute(
             "SELECT status FROM events WHERE id=?", (event["event_id"],)
         ).fetchone()
-        assert row["status"] == "review"
+        assert row["status"] == "error"
         assert inbox.store.db.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 0
 
 
@@ -178,5 +178,5 @@ async def test_older_edit_delivery_cannot_replace_current_revision_eligibility(i
         if eligible:
             assert row["status"] == "done" and len(inbox.engine.gate.orders) == 1
         else:
-            assert row["status"] == "review" and not inbox.engine.gate.writes
+            assert row["status"] == "error" and not inbox.engine.gate.writes
         assert not inbox.store.unknowns()

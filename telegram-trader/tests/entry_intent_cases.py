@@ -10,9 +10,9 @@ bearish setups, including an immediate entry whose rationale mentions a breakout
 from comprehensive_cases import case, decision
 
 CASES = [
-    case("real_entry_intent_CRCL_setup_not_market_1", [14959], [decision(["ignore", "review"])]),
-    case("real_entry_intent_CRCL_setup_not_market_2", [14959], [decision(["ignore", "review"])]),
-    case("real_entry_intent_CRCL_setup_not_market_3", [14959], [decision(["ignore", "review"])]),
+    case("real_entry_intent_CRCL_setup_not_market_1", [14959], [decision(["ignore"])]),
+    case("real_entry_intent_CRCL_setup_not_market_2", [14959], [decision(["ignore"])]),
+    case("real_entry_intent_CRCL_setup_not_market_3", [14959], [decision(["ignore"])]),
     case("real_entry_intent_KMNO_colloquial_short", [15309],
          [decision("open", symbol="KMNO", side="short", price=None)]),
     case("real_entry_intent_JTO_enter_now_breakout_rationale", [15342],

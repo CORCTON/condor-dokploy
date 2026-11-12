@@ -293,20 +293,21 @@ class FakeExchange:
         if path == "/tickers":
             return await self.market(params["contract"])
         if path == "/candlesticks":
-            return await self.candles(params["contract"])
+            return await self.candles(params["contract"], interval=params.get("interval", "5m"))
         raise AssertionError(f"Unsupported in-memory read: {path}")
 
     async def market(self, symbol):
         self._contract(symbol)
         return [deepcopy(self.quotes[symbol])]
 
-    async def candles(self, symbol):
+    async def candles(self, symbol, interval="5m"):
         self._contract(symbol)
         if symbol in self.candle_data:
             return deepcopy(self.candle_data[symbol])
         mark = Decimal(self.positions[symbol]["mark_price"])
         tick = Decimal(self.contracts[symbol]["order_price_round"])
-        now = int(time.time()) // 300 * 300
-        return [{"t": now - (120 - i) * 300, "o": str(mark), "c": str(mark),
+        seconds = {"5m": 300, "4h": 14400}[interval]
+        now = int(time.time()) // seconds * seconds
+        return [{"t": now - (120 - i) * seconds, "o": str(mark), "c": str(mark),
                  "h": str(mark + tick * 2), "l": str(max(tick, mark - tick * 2)), "v": "1000"}
                 for i in range(120)]

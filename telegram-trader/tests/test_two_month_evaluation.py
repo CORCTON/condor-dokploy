@@ -78,7 +78,7 @@ async def test_missing_images_do_not_fall_back_to_live_channel(tmp_path):
 
 
 @pytest.mark.parametrize("action,fields", [
-    ("ignore", {}), ("review", {}),
+    ("ignore", {}),
     ("open", {"symbol": "INJ", "side": "short", "price": None}),
     ("open", {"symbol": "BTC", "side": "long", "price": "100000"}),
     ("open", {"symbol": "PEPE", "side": "short", "price": "0.00000123"}),
@@ -133,11 +133,11 @@ def test_protocol_pass_does_not_hide_age_guard_execution_rejection():
     reports = [{"protocol_passed": True, "result": {"decisions": [{"action": "open"}]},
                 "event_result": {"status": status, "detail": detail}}
                for status, detail in (("done", ""),
-                                      ("review", "entry signal older than 60 seconds; no new entry"))]
+                                      ("error", "entry signal older than 60 seconds; no new entry"))]
     counts = evaluation.outcome_counts(reports)
     assert counts["open_decisions"] == 2
     assert counts["open_executed"] == 1
-    assert counts["open_review"] == 1
+    assert counts["open_blocked"] == 1
     assert counts["open_age_guard_blocked"] == 1
 
 

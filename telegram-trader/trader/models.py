@@ -16,13 +16,20 @@ def decimal(value) -> Decimal:
 
 class Signal(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["open", "close", "cancel", "tp1", "tp2", "sl", "targets", "ignore", "review"]
+    action: Literal["open", "close", "cancel", "tp1", "tp2", "sl", "targets", "ignore"]
     symbol: str | None = Field(default=None, pattern=r"^[A-Z0-9]{1,20}$")
     side: Literal["long", "short"] | None = None
     price: str | None = None
     target_trade_id: str | None = None
     reason: str = ""
-    levels: dict[Literal["sl", "tp1", "tp2"], str] = Field(default_factory=dict)
+    levels: dict[Literal["sl", "tp", "tp1", "tp2"], str] = Field(default_factory=dict)
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def ignore_legacy_review(cls, value):
+        # A worker finishing with the old schema must fail safely during an
+        # upgrade. New tool schemas offer no review/approval workflow.
+        return "ignore" if value == "review" else value
 
     @model_validator(mode="after")
     def validate_signal(self):
@@ -52,32 +59,28 @@ class Decisions(BaseModel):
 class Plan(BaseModel):
     model_config = ConfigDict(extra="forbid")
     sl: Decimal
-    tp1: Decimal
-    tp2: Decimal
-    tp1_fraction: Decimal
+    tp: Decimal
     rationale: str
 
-    @field_validator("sl", "tp1", "tp2", "tp1_fraction", mode="before")
+    @field_validator("sl", "tp", mode="before")
     @classmethod
     def finite(cls, value):
         return decimal(value)
 
     @model_validator(mode="after")
     def validate_values(self):
-        if min(self.sl, self.tp1, self.tp2) <= 0:
+        if min(self.sl, self.tp) <= 0:
             raise ValueError("prices must be positive")
-        if not 0 < self.tp1_fraction < 1:
-            raise ValueError("tp1_fraction must be between zero and one")
         if not self.rationale.strip():
             raise ValueError("rationale required")
         return self
 
     def validate_side(self, side: str, entry: Decimal, *, validate_stop: bool = True):
         if side == "long" and not (
-            entry < self.tp1 < self.tp2 and (not validate_stop or self.sl < entry)
+            entry < self.tp and (not validate_stop or self.sl < entry)
         ):
             raise ValueError("invalid long exit ordering")
         if side == "short" and not (
-            entry > self.tp1 > self.tp2 and (not validate_stop or self.sl > entry)
+            entry > self.tp and (not validate_stop or self.sl > entry)
         ):
             raise ValueError("invalid short exit ordering")

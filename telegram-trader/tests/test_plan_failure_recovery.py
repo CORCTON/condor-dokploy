@@ -140,7 +140,7 @@ async def test_failure_waits_for_inflight_apply_and_never_releases_or_replays_it
     current = engine.store.trade(job["trade_id"])
     assert not current["plan_needed"]
     assert current["plan_token"] == job["lease"]
-    assert len(engine.gate.orders) == 3 and len(engine.gate.stops) == 1
+    assert len(engine.gate.orders) == 2 and len(engine.gate.stops) == 1
     writes = copy.deepcopy(engine.gate.writes)
     assert not await engine.fail_plan(
         job["trade_id"], job["version"], job["lease"], "LostApplyResponse"

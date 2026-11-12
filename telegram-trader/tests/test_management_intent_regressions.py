@@ -61,9 +61,9 @@ def test_valid_target_does_not_make_reported_or_conflicted_tp1_semantically_vali
 
 
 @pytest.mark.parametrize("spec,action", [
-    (CONFLICT, "review"), (COMPLETED_STATUS, "ignore"), (COMPLETED_STATUS, "review"),
+    (CONFLICT, "ignore"), (COMPLETED_STATUS, "ignore"), (COMPLETED_STATUS, "ignore"),
     (CONFLICT, "tp1"), (COMPLETED_STATUS, "tp1"),
-] + [(spec, "review") for spec in CONTEXT_CASES[8:]],
+] + [(spec, "ignore") for spec in CONTEXT_CASES[8:]],
     ids=["conflict-review", "completed-ignore", "completed-review",
          "wrong-conflict-tp1-fails-acceptance", "wrong-completed-tp1-fails-acceptance"]
     + [spec["name"] for spec in CONTEXT_CASES[8:]])
@@ -98,7 +98,7 @@ async def test_management_intent_regression_checks_state_effects(
         assert report["semantic_passed"] is report["execution_passed"] is False
         assert not report["passed"] and "unrelated position changed" in report["error"]
         before = report["owned_before"]["A"]
-        assert 0 < abs(exchange.positions[before["symbol"]]["size"]) < before["filled"]
+        assert before["filled"] > 0 and exchange.positions[before["symbol"]]["size"] == 0
     else:
         assert report["passed"] and not exchange.writes, report
         assert_context_report(spec, report)
@@ -108,5 +108,4 @@ async def test_management_intent_regression_checks_state_effects(
             assert abs(exchange.positions[before["symbol"]]["size"]) == before["filled"]
             assert current["exits"] == before["exits"]
             assert exchange.stops[before["exits"]["sl"]["id"]]["status"] == "open"
-            assert all(exchange.orders[before["exits"][key]["id"]]["status"] == "open"
-                       for key in ("tp1", "tp2"))
+            assert exchange.orders[before["exits"]["tp"]["id"]]["status"] == "open"
