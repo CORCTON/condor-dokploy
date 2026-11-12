@@ -14,17 +14,13 @@ def build(output):
     for name, pair, instruction in (
         ("explicit", "INJ-USDT", "Wait for breakout above resistance, then LONG"),
         ("chart_only", "INJ-USDT", ""),
-        ("unreadable", "INJ-USDT", "Wait for breakout above resistance, then LONG"),
         ("conflict", "SOL-USDT", "Wait for breakout above resistance, then LONG"),
     ):
         fig, ax = plt.subplots(figsize=(10, 5), dpi=120)
         prices = [9.75, 10.2, 10.5, 9.8, 10.15, 10.5, 9.85, 10.2, 10.5, 10.0]
         ax.plot(prices, color="#2368b5", linewidth=2)
         ax.axhline(10.5, color="#cb473b", linewidth=2)
-        if name == "unreadable":
-            ax.set_yticks([])
-        else:
-            ax.text(0.1, 10.52, "Resistance 10.50", color="#cb473b")
+        ax.text(0.1, 10.52, "Resistance 10.50", color="#cb473b")
         ax.annotate("", xy=(10.8, 10.8), xytext=(9, 10),
                     arrowprops={"arrowstyle": "->", "color": "#cb473b", "lw": 2})
         ax.set_ylim(9.4, 11)

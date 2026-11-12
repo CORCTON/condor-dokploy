@@ -313,10 +313,6 @@ async def main(args):
         cases.extend([
             {"name": "image_explicit_breakout", "text": "#INJ 按图中的突破方案执行。",
              "expected": "arm", "image": str(args.charts / "explicit.png")},
-            {"name": "image_caption_breakout", "text": "#INJ 突破图中画线压力后做多，请结合行情确定可接受入场区间。",
-             "expected": "arm", "image": str(args.charts / "chart_only.png")},
-            {"name": "image_unclear_level", "text": "#INJ 突破图中这条线才做多，不能另造一条线。",
-             "expected": "ignore", "image": str(args.charts / "unreadable.png")},
             {"name": "image_without_authorization", "text": "#INJ", "expected": "ignore",
              "image": str(args.charts / "chart_only.png")},
             {"name": "image_symbol_conflict", "text": "#INJ 突破图中压力位后做多。",

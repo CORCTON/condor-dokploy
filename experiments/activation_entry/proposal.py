@@ -32,6 +32,10 @@ POLICY = """
 上破做多时整个区间必须在当前中间价之上；下破做空时整个区间必须在其下。
 如果已突破，不得追价或另造触发位。如果只接受首次方向穿越，本工具不支持。
 区间应覆盖合理入场范围并有结构/价差依据，不能扩成无上限的追价。
+arm 必须分别提交识别出的结构带 structural_lower/structural_upper 与激活区间 lower/upper。
+做多激活下沿必须严格高于压力带上沿；做空激活上沿必须严格低于支撑带下沿。
+不能只突破结构带内部的最近一次高/低点就称为突破整条关键压力/支撑带。
+单一明确价位可作为零宽度结构带，真实越过该线后才激活，不得为通过校验篡改结构。
 已有待激活计划的明确撤销，可 cancel，必须使用工具返回的准确 plan_id。
 已成交后“撤单”不能假装能撤销成交；此研究工具不平仓，ignore 交回既有持仓管理。
 submit_activation_proposal 只是生成配置，不表示已经挂单或成交。
@@ -50,6 +54,8 @@ class Proposal(BaseModel):
     side: Literal["long", "short"] | None = None
     lower: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
     upper: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    structural_lower: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    structural_upper: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
     target_plan_id: str | None = None
     evidence_message_ids: list[int] = Field(min_length=1)
     rationale: str = Field(min_length=10)
@@ -61,7 +67,16 @@ class Proposal(BaseModel):
                 raise ValueError("arm requires pair, side and both absolute bounds")
             if self.lower >= self.upper or self.target_plan_id is not None:
                 raise ValueError("arm requires lower < upper and no target plan")
-        elif any(v is not None for v in (self.trading_pair, self.side, self.lower, self.upper)):
+            if self.structural_lower is None or self.structural_upper is None:
+                raise ValueError("arm requires the observed structural support/resistance band")
+            if self.structural_lower > self.structural_upper:
+                raise ValueError("structural band must be ordered")
+            if self.side == "long" and self.lower <= self.structural_upper:
+                raise ValueError("long activation must be strictly above the full resistance band")
+            if self.side == "short" and self.upper >= self.structural_lower:
+                raise ValueError("short activation must be strictly below the full support band")
+        elif any(v is not None for v in (self.trading_pair, self.side, self.lower, self.upper,
+                                         self.structural_lower, self.structural_upper)):
             raise ValueError("non-arm actions must not carry entry parameters")
         if (self.action == "cancel") != bool(self.target_plan_id):
             raise ValueError("only cancel requires target_plan_id")

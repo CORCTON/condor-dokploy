@@ -69,7 +69,7 @@ def step(runtime, price):
     return runtime.strategy.buy.call_count + runtime.strategy.sell.call_count
 
 
-def check_config(config, venue_rules=None):
+def check_config(config, venue_rules=None, proposal=None):
     centre = D(config["entry_price"])
     a, b = map(D, config["activation_bounds"])
     lower, upper = (centre * (1 - a), centre * (1 + b)) if config["side"] == 1 else (
@@ -78,6 +78,13 @@ def check_config(config, venue_rules=None):
     before, beyond = (lower - epsilon, upper + epsilon) if config["side"] == 1 else (
         upper + epsilon, lower - epsilon)
     checks = []
+    if proposal:
+        assert config["trading_pair"] == proposal.trading_pair
+        assert config["side"] == (1 if proposal.side == "long" else 2)
+        tolerance = max(proposal.upper, D(1)) * D("1e-20")
+        assert abs(lower - proposal.lower) < tolerance
+        assert abs(upper - proposal.upper) < tolerance
+        checks.append("model_proposal_bounds_preserved")
     if venue_rules:
         amount = D(config["amount"])
         assert amount % D(str(venue_rules["min_base_amount_increment"])) == 0
@@ -122,6 +129,8 @@ def main(args):
     for side, lower, upper in (("long", "10.5", "10.6"), ("short", "9.4", "9.5")):
         proposal = Proposal(action="arm", trading_pair="INJ-USDT", side=side,
                             lower=lower, upper=upper, evidence_message_ids=[101],
+                            structural_lower="10.49" if side == "long" else "9.51",
+                            structural_upper="10.49" if side == "long" else "9.51",
                             rationale="Deterministic API and executor boundary verification")
         config = position_config(proposal, mid=D(10), tick=D("0.01"), amount=D(1), leverage=10)
         reports.append({"case": side, "checks": check_config(config)})
@@ -129,8 +138,9 @@ def main(args):
         for line in args.proposals.read_text().splitlines():
             result = json.loads(line)
             if result.get("executor_config"):
+                proposal = Proposal.model_validate(result["proposal"])
                 reports.append({"case": result["case"], "repeat": result["repeat"],
-                                "checks": check_config(result["executor_config"], result.get("venue_rules"))})
+                                "checks": check_config(result["executor_config"], result.get("venue_rules"), proposal)})
     source = Path(inspect.getfile(PositionExecutor))
     result = {"passed": True, "official_source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
               "reports": reports, "real_exchange_writes": 0,

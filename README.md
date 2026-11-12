@@ -92,6 +92,11 @@ minimum, not the live account's equity allocation. Keep source captures and
 model transcripts outside this public deployment repository.
 These entry-only experiment configs omit live exit management and must not be
 submitted to a funded account.
+The proposal schema keeps the model's structural support/resistance band separate
+from its entry band. A long entry must be strictly above the entire declared
+resistance band; a short entry must be strictly below the support band. This
+rejects internally inconsistent early entries without hard-coding a market price
+or claiming that the model's identified structure is objectively optimal.
 
 Every source-channel update (including chatter, edits and media) enters a durable
 SQLite inbox. `signal_interpreter` uses Condor's official model-client factory and

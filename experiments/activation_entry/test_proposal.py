@@ -13,6 +13,7 @@ from tools import on_call_tool
 def arm(**kwargs):
     return Proposal(action="arm", trading_pair="INJ-USDT", side="long",
                     lower="10.50", upper="10.60", evidence_message_ids=[101],
+                    structural_lower="10.40", structural_upper="10.49",
                     rationale="Based on the repeatedly tested resistance at 10.50", **kwargs)
 
 
@@ -42,6 +43,23 @@ def test_invalid_tool_arguments(field, value):
     raw = arm().model_dump(mode="json")
     raw[field] = value
     with pytest.raises(ValueError):
+        Proposal.model_validate(raw)
+
+
+@pytest.mark.parametrize("side,lower,upper,structural_lower,structural_upper", [
+    ("long", "2.425", "2.438", "2.424", "2.435"),
+    ("long", "2.435", "2.450", "2.424", "2.435"),
+    ("short", "53.75", "54.10", "54.04", "54.15"),
+    ("short", "53.75", "54.04", "54.04", "54.15"),
+])
+def test_entry_cannot_overlap_or_touch_its_own_structural_band(
+    side, lower, upper, structural_lower, structural_upper,
+):
+    raw = arm().model_dump(mode="json") | dict(
+        side=side, lower=lower, upper=upper,
+        structural_lower=structural_lower, structural_upper=structural_upper,
+    )
+    with pytest.raises(ValueError, match="strictly"):
         Proposal.model_validate(raw)
 
 
