@@ -47,9 +47,51 @@ Rotating the client key requires updating both CPA's access keys and Condor's
 
 # Telegram channel execution extension
 
+The extension's MCP tool server now targets upstream Condor's MCP 2 runtime.
+Upgrade the Condor image and these tool assets together: the new assets must not
+be installed into the previous MCP 1 image. Protocol tests cover evidence/image
+reads, rejected arguments, stale leases and typed proposal submission.
+
 The deployment adds `telegram-trader` and one local `telegram_agent` with three
 Routines. Upstream Condor files are not modified. The old Windsurf endpoint is
 not used by this extension. All services/data that already exist are retained.
+
+`experiments/activation_entry` is an opt-in, isolated activation-entry feasibility
+test, not a deployed Routine or a new live signal action. It uses Condor's model
+factory and market-data functions, then verifies proposed configs with the actual
+Hummingbot API router/service and `PositionExecutor` against a simulated connector.
+Only the model endpoint has credentials; exchange writes and production state are
+absent. Generated charts are constructed fixtures, and real Gate snapshots are
+labelled as-of captures, not live feeds or a profitable-strategy backtest.
+`activation_bounds` is current-mid-price range gating, not first-crossing, dwell,
+retest or candle-close confirmation. The experiment deliberately does not add
+live ownership, pending-plan persistence, fill/cancel race handling or restart
+recovery; those require a separate integration before enabling channel breakouts.
+
+Run its offline guards with the upstream Condor development environment:
+
+```sh
+PYTHONPATH=/path/to/condor:experiments/activation_entry \
+  /path/to/condor/.venv/bin/python -m pytest -q experiments/activation_entry/test_proposal.py
+```
+
+For model evaluation, run `evaluate.py --provider /private/llm.json --output
+/results/run.jsonl --charts /results/charts` in an isolated Condor runtime. The
+provider file contains only `agent_key`, `base_url`, and `api_key`; never commit
+it or mount production account/state directories. Optional `--real-image` and
+`--market-snapshot` inputs are labelled separately in the results. Then run
+`check_hummingbot.py --proposals /results/run.jsonl` inside the Hummingbot API
+image with `--network none`, no account mounts, and the experiment on `PYTHONPATH`.
+This validates the real router/service/executor with simulated exchange I/O;
+it does not claim testnet fills, market profitability, or live readiness.
+`--replay /private/cases.json` accepts privately captured channel text, original
+images and reply chains. Historical runs use only already-closed Gate candles;
+the latest closed candle may be an explicitly labelled reference-price proxy,
+never a reconstructed historical order book. Rehearsal size is the venue-valid
+minimum, not the live account's equity allocation. Keep source captures and
+model transcripts outside this public deployment repository.
+These entry-only experiment configs omit live exit management and must not be
+submitted to a funded account.
 
 Every source-channel update (including chatter, edits and media) enters a durable
 SQLite inbox. `signal_interpreter` uses Condor's official model-client factory and
