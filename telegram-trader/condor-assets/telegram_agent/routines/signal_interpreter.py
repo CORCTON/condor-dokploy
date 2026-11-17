@@ -165,7 +165,8 @@ before deciding again, checking later cancellations/exits or replacements after 
 ID (also listed in deferred_after_message_ids), not only the re-claimed opening text.
 Use history/image tools if more context is needed. context_events are full later messages
 already received at this snapshot, marked context_only; they never authorize new actions.
-Margin budget 20% of total futures equity, isolated 10x, is enforced by the executor.
+Initial margin budget 20% of total futures equity, cross 10x, is enforced by the executor.
+This budget sizes entries, not maximum losses; cross positions share account collateral.
 Automatic add-ons are disabled; a new add-on instruction means ignore, never open.
 For open set base symbol, side, and price=null for market or an explicit limit price.
 No initial stop is required; the operator permits a gap before exit planning.

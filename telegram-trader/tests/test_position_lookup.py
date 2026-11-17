@@ -55,7 +55,7 @@ async def test_first_contract_missing_record_allows_entry_only_after_real_mode_v
     assert reads[0] == 0 and reads[1] == 1
     assert len(entry_writes(exchange)) == 1
     assert exchange.writes[0][1] == POSITION + "/set_leverage"
-    assert exchange.writes[0][3] == {"leverage": "10", "margin_mode": "isolated"}
+    assert exchange.writes[0][3] == {"leverage": "10", "margin_mode": "cross"}
     assert exchange.positions[SYMBOL]["size"] == (14 if side == "long" else -14)
     assert store.trades()[0]["filled"] == 14
     assert not store.unknowns()
@@ -169,7 +169,7 @@ async def test_missing_position_after_leverage_write_still_forbids_order(rig, mo
 
 
 @pytest.mark.parametrize("invalid", [
-    {"lever": "7"}, {"pos_margin_mode": "cross"}, {"mode": "dual"}, {"size": 2},
+    {"lever": "7"}, {"pos_margin_mode": "isolated"}, {"mode": "dual"}, {"size": 2},
 ])
 async def test_initial_missing_never_fabricates_successful_post_leverage_mode(
     rig, monkeypatch, invalid
@@ -188,7 +188,7 @@ async def test_initial_missing_never_fabricates_successful_post_leverage_mode(
 
     monkeypatch.setattr(exchange, "get", invalid_verification)
     result = await decision(rig, "open", symbol="FIL", side="short")
-    assert result == {"status": "error", "detail": "isolated 10x could not be verified"}
+    assert result == {"status": "error", "detail": "cross 10x could not be verified"}
     assert len(exchange.writes) == 1
     assert exchange.writes[0][1] == POSITION + "/set_leverage"
     assert not entry_writes(exchange)

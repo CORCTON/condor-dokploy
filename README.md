@@ -99,8 +99,10 @@ write exists. Original model deadlines and entry-age checks remain unchanged.
 ## Safety and execution contract
 
 - Initial margin budget: 20% × (classic USDT futures balance + unrealised PnL).
-  Fixed isolated 10x. Contract counts round down; market slippage and fees mean
-  the actual margin debit need not exactly equal that budget.
+  Fixed cross 10x. Contract counts round down; market slippage and fees mean
+  the actual initial margin requirement need not exactly equal that budget.
+  The 20% allocation sizes the entry, not maximum loss: cross positions share
+  available account collateral and affect each other's liquidation risk.
 - Only model-interpreted explicit unconditional market/limit entries; no automatic
   channel breakout monitoring or add-ons. Manual chart-based conditional trading
   is not enabled by this extension and must not share ownership of these positions.
@@ -108,7 +110,7 @@ write exists. Original model deadlines and entry-age checks remain unchanged.
   classic USDT futures account (`margin_mode=0`, `position_mode=single`).
   Decimal contracts and other account modes are rejected. The deprecated
   `enable_evolved_classic` field is not used to infer account mode. Leverage is
-  set explicitly with `set_leverage` and `margin_mode=isolated`, then verified
+  set explicitly with `set_leverage` and `margin_mode=cross`, then verified
   using the returned position's `pos_margin_mode`, `mode`, and `lever` fields.
 - No initial stop is invented. No timed position close. AI plans are schema-,
   version-, direction- and tick-checked. Channel numeric levels take precedence.

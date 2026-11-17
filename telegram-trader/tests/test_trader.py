@@ -45,7 +45,7 @@ class Exchange:
             "size": 0,
             "leverage": "0",
             "lever": "10",
-            "pos_margin_mode": "isolated",
+            "pos_margin_mode": "cross",
             "mode": "single",
             "mark_price": "10",
             "entry_price": "10",
@@ -672,7 +672,7 @@ async def test_deprecated_account_flag_does_not_reject_classic(rig):
     rig[1].account["enable_evolved_classic"] = True
     await signal(rig)
     assert len(rig[1].orders) == 1
-    assert rig[1].writes[0][3] == {"leverage": "10", "margin_mode": "isolated"}
+    assert rig[1].writes[0][3] == {"leverage": "10", "margin_mode": "cross"}
 
 
 @pytest.mark.parametrize("field", ["margin_mode", "position_mode"])
@@ -683,7 +683,7 @@ async def test_missing_account_mode_fails_closed(rig, field):
 
 
 @pytest.mark.parametrize(
-    "field,value", [("pos_margin_mode", "cross"), ("lever", "12"), ("mode", "dual_long")]
+    "field,value", [("pos_margin_mode", "isolated"), ("lever", "12"), ("mode", "dual_long")]
 )
 async def test_changed_position_mode_does_not_send_orders(rig, field, value):
     await signal(rig)

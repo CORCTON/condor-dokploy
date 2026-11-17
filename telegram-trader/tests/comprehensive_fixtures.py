@@ -48,7 +48,7 @@ class FakeExchange:
         }
         self.positions[symbol] = {
             "contract": symbol, "size": 0, "leverage": "0", "lever": "10",
-            "pos_margin_mode": "isolated", "mode": "single", "entry_price": "0",
+            "pos_margin_mode": "cross", "mode": "single", "entry_price": "0",
             "mark_price": str(decimal(price)),
         }
         self.set_market(symbol, price=price)
@@ -210,9 +210,10 @@ class FakeExchange:
             symbol = path.split("/")[2]
             contract = self._contract(symbol)
             leverage = self._integer(params["leverage"], minimum=1)
-            if leverage > decimal(contract["leverage_max"]) or params["margin_mode"] != "isolated":
+            if (leverage > decimal(contract["leverage_max"])
+                    or params["margin_mode"] not in {"isolated", "cross"}):
                 raise GateError(400, "INVALID_LEVERAGE_OR_MARGIN")
-            self.positions[symbol].update(lever=str(leverage), pos_margin_mode="isolated")
+            self.positions[symbol].update(lever=str(leverage), pos_margin_mode=params["margin_mode"])
             return deepcopy(self.positions[symbol])
         if method == "POST" and path == "/orders":
             return self._new_order(body)

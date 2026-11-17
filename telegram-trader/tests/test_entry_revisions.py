@@ -225,7 +225,7 @@ async def test_edit_arriving_during_entry_checks_requires_new_decision_before_or
 async def test_fresh_edit_does_not_override_previously_recorded_rejected_trade(inbox):
     # A failed pre-submit attempt may have no :entry intent; it still requires review.
     receive(inbox)
-    inbox.engine.gate.positions["INJ_USDT"]["pos_margin_mode"] = "cross"
+    inbox.engine.gate.positions["INJ_USDT"]["pos_margin_mode"] = "isolated"
     real_request = inbox.engine.gate.request
 
     async def leverage_rejected(method, path, body=None, params=None):

@@ -152,7 +152,7 @@ async def cycle(gate, session, name, interpreter, planner):
             report["position"] = {
                 k: position.get(k) for k in ("size", "lever", "mode", "pos_margin_mode")
             }
-            assert position["pos_margin_mode"] == "isolated" and Decimal(position["lever"]) == 10
+            assert position["pos_margin_mode"] == "cross" and Decimal(position["lever"]) == 10
             assert Decimal(trade["margin_budget"]) == Decimal(trade["equity"]) * Decimal("0.2")
             before = len(gate.writes)
             await send(entry, 1, "open")

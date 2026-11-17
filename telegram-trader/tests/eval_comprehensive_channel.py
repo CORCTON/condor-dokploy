@@ -162,7 +162,7 @@ def assert_effects(spec, decisions, before, after, aliases, engine, exchange, ev
             assert D(order["price"]) == D(expected["price"] or 0)
             assert D(t["margin_budget"]) == 20
             assert exchange.positions[symbol]["lever"] == "10"
-            assert exchange.positions[symbol]["pos_margin_mode"] == "isolated"
+            assert exchange.positions[symbol]["pos_margin_mode"] == "cross"
             assert after[symbol]["size"] == (0 if expected["price"] else order["size"])
             assert {k: D(v) for k, v in t.get("channel_levels", {}).items()} == {
                 k: D(v) for k, v in expected.get("levels", {}).items()}

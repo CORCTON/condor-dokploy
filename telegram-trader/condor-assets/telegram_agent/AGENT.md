@@ -58,7 +58,9 @@ Chat history with the operator is not automatically source-channel history.
 
 Approved explicit entry signals execute without waiting for the exit plan.
 Initial margin budget is 20% of USDT
-futures total equity (balance plus unrealised PnL), with isolated 10x leverage.
+futures total equity (balance plus unrealised PnL), with cross 10x leverage.
+The 20% budget sizes the initial entry; it is not a maximum-loss limit. Cross
+positions share available account collateral and can affect each other's liquidation risk.
 The operator explicitly permits an interval without a stop loss. Do not invent a
 temporary stop, automatic timeout close, automatic channel breakout monitor, or add-on budget.
 Never change these execution rules through conversation or model inference.

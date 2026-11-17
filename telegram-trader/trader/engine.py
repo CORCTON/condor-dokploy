@@ -47,9 +47,9 @@ def target_levels(levels):
     return result
 
 
-def isolated_position(position):
+def cross_position(position):
     return (
-        position.get("pos_margin_mode") == "isolated"
+        position.get("pos_margin_mode") == "cross"
         and position.get("mode") == "single"
         and D(position.get("lever", 0)) == LEVERAGE
     )
@@ -382,11 +382,11 @@ class Engine:
                 trade_id + ":leverage",
                 "POST",
                 f"/positions/{symbol}/set_leverage",
-                params={"leverage": str(LEVERAGE), "margin_mode": "isolated"},
+                params={"leverage": str(LEVERAGE), "margin_mode": "cross"},
             )
             verified = await self.gate.get(f"/positions/{symbol}")
-            if not isolated_position(verified) or D(verified["size"]) != 0:
-                raise Review(f"isolated {LEVERAGE}x could not be verified")
+            if not cross_position(verified) or D(verified["size"]) != 0:
+                raise Review(f"cross {LEVERAGE}x could not be verified")
             if self.store.watermark(event["channel"]) != watermark:
                 raise Reanalyze("new message before order submission; reanalyze before entry")
             if time.time() - json.loads(event["payload"])["source_time"] > 60:
@@ -404,8 +404,10 @@ class Engine:
             trade["status"] = "working"
             self.store.save_trade(trade)
             self.store.notice(
-                f"Entry accepted: {symbol} {signal.side}, {lots} contracts, isolated {LEVERAGE}x. "
-                f"Margin budget {margin} USDT (20% of equity {equity}). Fill not yet confirmed; no SL yet."
+                f"Entry accepted: {symbol} {signal.side}, {lots} contracts, cross {LEVERAGE}x. "
+                f"Initial margin budget {margin} USDT (20% of equity {equity}); "
+                "cross margin can use other available account funds, so this is not a loss cap. "
+                "Fill not yet confirmed; no SL yet."
             )
             await self.refresh(trade)
             if signal.levels and trade["filled"]:
@@ -465,7 +467,7 @@ class Engine:
         position = await self.gate.get(f"/positions/{trade['symbol']}")
         size = D(position["size"])
         sign = 1 if trade["side"] == "long" else -1
-        if size * sign < 0 or abs(size) > trade["lots"] or not isolated_position(position):
+        if size * sign < 0 or abs(size) > trade["lots"] or not cross_position(position):
             self.pause("position ownership/mode mismatch")
             raise Review("position ownership/mode mismatch; no orders sent")
         if size != size.to_integral_value():

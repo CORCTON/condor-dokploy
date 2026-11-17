@@ -91,7 +91,7 @@ async def test_seed_creates_the_declared_owned_state(rig, fixture, position, rem
     assert owned["margin_budget"] == "20.0"
     assert exchange.positions["INJ_USDT"]["size"] == position
     assert exchange.positions["INJ_USDT"]["lever"] == "10"
-    assert exchange.positions["INJ_USDT"]["pos_margin_mode"] == "isolated"
+    assert exchange.positions["INJ_USDT"]["pos_margin_mode"] == "cross"
     assert exchange.orders[owned["entry_id"]]["left"] == remaining
     assert all(owned["exits"].get(name, {}).get("id") for name in ("sl", "tp")) is planned
     if fixture.get("tp_done"):

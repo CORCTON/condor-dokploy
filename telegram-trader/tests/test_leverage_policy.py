@@ -1,4 +1,4 @@
-"""Independent contract checks for the operator's isolated 10x / 20% policy."""
+"""Independent contract checks for the operator's cross 10x / 20% entry-size policy."""
 
 import time
 
@@ -12,9 +12,10 @@ from trader.store import Store
 
 @pytest.mark.parametrize("side,direction", [("long", 1), ("short", -1)])
 @pytest.mark.parametrize("limit_price,expected_lots", [(None, 20), ("8", 25)])
-async def test_new_entry_uses_isolated_10x_and_twenty_percent_equity(side, direction, limit_price, expected_lots):
+async def test_new_entry_uses_cross_10x_and_twenty_percent_equity(side, direction, limit_price, expected_lots):
     store, exchange = Store(":memory:"), FakeExchange(equity="100")
     exchange.add_contract("INJ_USDT", price="10")
+    exchange.positions["INJ_USDT"]["pos_margin_mode"] = "isolated"
     engine = Engine(store, exchange, enabled=True)
     engine.listener_ready = True
     store.set("paused", False)
@@ -28,10 +29,11 @@ async def test_new_entry_uses_isolated_10x_and_twenty_percent_equity(side, direc
         assert trade["lots"] == expected_lots
         assert exchange.writes[0] == (
             "POST", "/positions/INJ_USDT/set_leverage", None,
-            {"leverage": "10", "margin_mode": "isolated"},
+            {"leverage": "10", "margin_mode": "cross"},
         )
         assert exchange.orders[trade["entry_id"]]["size"] == direction * expected_lots
         assert exchange.positions["INJ_USDT"]["lever"] == "10"
+        assert exchange.positions["INJ_USDT"]["pos_margin_mode"] == "cross"
     finally:
         store.close()
 
